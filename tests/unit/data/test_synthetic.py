@@ -44,3 +44,14 @@ def test_snapshot_builds_for_session():
     assert {b.symbol for b in snap.bars} == {"AAPL", "MSFT", "NVDA"}
     assert snap.fundamentals
     assert snap.as_of.date() == session
+
+
+def test_snapshot_uses_new_york_market_close():
+    january = snapshot_for(("AAPL",), date(2026, 1, 2))
+    july = snapshot_for(("AAPL",), date(2026, 7, 1))
+
+    assert january.as_of == datetime(2026, 1, 2, 21, tzinfo=UTC)
+    assert july.as_of == datetime(2026, 7, 1, 20, tzinfo=UTC)
+    for snapshot in (january, july):
+        assert snapshot.fundamentals
+        assert all(obs.as_of == snapshot.as_of for obs in snapshot.fundamentals)
