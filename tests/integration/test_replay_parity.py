@@ -539,6 +539,30 @@ def test_event_timestamps_must_preserve_decision_execution_mark_order(
     assert {path: path.read_bytes() for path in public_paths} == before
 
 
+def test_coherent_forged_portfolio_is_rejected_by_ledger_reconstruction(
+    tmp_path: Path,
+) -> None:
+    make_runner(tmp_path).step(frames()[0])
+    public_paths = [tmp_path / name for name in ARTIFACTS + ["events.jsonl", "initial-state.json"]]
+    before = {path: path.read_bytes() for path in public_paths}
+    journal_path = tmp_path / f"transitions/{SESSIONS[0].isoformat()}.json"
+    journal = json.loads(journal_path.read_text())
+    forged_cash = str(Decimal(journal["portfolio"]["cash"]) + Decimal("1.00"))
+    forged_equity = str(Decimal(journal["portfolio"]["total_equity"]) + Decimal("1.00"))
+    journal["portfolio"]["cash"] = forged_cash
+    journal["portfolio"]["total_equity"] = forged_equity
+    journal["equity"]["equity"] = forged_equity
+    marked = next(event for event in journal["events"] if event["event_type"] == "portfolio_marked")
+    marked["payload"]["cash"] = forged_cash
+    marked["payload"]["total_equity"] = forged_equity
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(TransitionIntegrityError, match="ledger reconstruction"):
+        make_runner(tmp_path)
+
+    assert {path: path.read_bytes() for path in public_paths} == before
+
+
 @pytest.mark.parametrize(
     "projection",
     ["fill_price", "created_order_quantity", "rejection_symbol"],

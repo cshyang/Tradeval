@@ -23,6 +23,7 @@ from retailtrader.domain import (
 )
 from retailtrader.simulation.execution import execute_rebalance
 from retailtrader.simulation.frame import SimulationFrame
+from retailtrader.simulation.ledger import LedgerReplayError, replay_events
 from retailtrader.storage.artifacts import RunWriter, fill_row, portfolio_row
 from retailtrader.storage.events import EventLog, event_record, to_jsonable
 from retailtrader.storage.transitions import (
@@ -69,6 +70,21 @@ def portfolio_from_row(run_id: str, row: Mapping[str, Any]) -> PortfolioSnapshot
     )
 
 
+def _validate_ledger_reconstruction(
+    initial_events: Sequence[Mapping[str, Any]],
+    transitions: Sequence[Mapping[str, Any]],
+) -> None:
+    events = [*initial_events]
+    for transition in transitions:
+        events.extend(transition["events"])
+    try:
+        replay_events(events)
+    except LedgerReplayError as exc:
+        raise TransitionIntegrityError(
+            f"canonical journal ledger reconstruction failed: {exc}"
+        ) from exc
+
+
 def _materialize(
     event_log: EventLog,
     writer: RunWriter,
@@ -80,6 +96,7 @@ def _materialize(
 ) -> list[dict[str, Any]]:
     transition_store.ensure_durable()
     validated = transition_store.read_all() if transitions is None else list(transitions)
+    _validate_ledger_reconstruction(initial_events, validated)
     event_log.materialize(initial_events, validated, failure_hook)
     writer.materialize(validated, failure_hook)
     return validated
@@ -137,6 +154,7 @@ def _step_locked(
     """Run one transition while the caller owns the run-level lock."""
     transition_store.ensure_durable()
     transitions = transition_store.read_all()
+    _validate_ledger_reconstruction(initial_events, transitions)
     session_key = frame.execution_session.isoformat()
     completed = {transition["session"] for transition in transitions}
     if transitions:
@@ -349,20 +367,27 @@ class ExperimentRunner:
             metadata = self.transition_store.validate_metadata(**metadata_arguments)
             self.writer.validate_run_metadata(experiment, philosophy_yaml)
 
-            if metadata is None:
-                metadata = self.transition_store.initialize_metadata(**metadata_arguments)
-            self.writer.heal_run_metadata(experiment, philosophy_yaml)
-            created_as_of = datetime.fromisoformat(metadata["created_as_of"])
-            durable_initial_cash = Decimal(metadata["initial_cash"])
+            event_run_id = metadata["run_id"] if metadata else experiment.run_id
+            created_as_of = (
+                datetime.fromisoformat(metadata["created_as_of"])
+                if metadata
+                else requested_created_as_of
+            )
+            durable_initial_cash = Decimal(metadata["initial_cash"]) if metadata else initial_cash
             self.initial_events = [
                 event_record(
-                    metadata["run_id"],
+                    event_run_id,
                     "portfolio_created",
                     created_as_of,
                     {"cash": durable_initial_cash, "as_of": created_as_of},
                     created_as_of,
                 )
             ]
+            _validate_ledger_reconstruction(self.initial_events, transitions)
+
+            if metadata is None:
+                self.transition_store.initialize_metadata(**metadata_arguments)
+            self.writer.heal_run_metadata(experiment, philosophy_yaml)
             _materialize(
                 self.event_log,
                 self.writer,
