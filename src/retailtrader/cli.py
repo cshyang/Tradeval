@@ -167,6 +167,10 @@ def demo(
         f"building {len(decision_sessions)} weekly frames for {len(symbols)} symbols…"
     )
     frames = _simulation_frames(symbols, decision_sessions)
+    if len(frames) < 3:
+        raise typer.BadParameter(
+            f"evaluation requires at least 3 simulation frames; got {len(frames)}"
+        )
     execution_snapshots = [frame.execution for frame in frames]
     benchmarks = _benchmarks(execution_snapshots, symbols)
     universe_hash = hashlib.sha256(UNIVERSE_FILE.read_bytes()).hexdigest()

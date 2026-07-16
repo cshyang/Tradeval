@@ -2,10 +2,34 @@ from __future__ import annotations
 
 from datetime import UTC, date, time
 from decimal import Decimal
+from pathlib import Path
 
-from retailtrader.cli import INITIAL_CASH, SPY_PROXY, _benchmarks, _simulation_frames
+from typer.testing import CliRunner
+
+from retailtrader.cli import INITIAL_CASH, SPY_PROXY, _benchmarks, _simulation_frames, app
 
 from tests.helpers import make_frame
+
+
+def test_demo_rejects_too_few_frames_before_writing_artifacts(tmp_path: Path) -> None:
+    workspace = tmp_path / "too-short"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "demo",
+            "--workspace",
+            str(workspace),
+            "--start",
+            "2024-01-05",
+            "--end",
+            "2024-01-12",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "evaluation requires at least 3 simulation frames; got 2" in result.output
+    assert not workspace.exists()
 
 
 def test_simulation_frames_execute_on_next_session_after_decision() -> None:
