@@ -178,6 +178,16 @@ def demo(
     typer.echo(f"done: {len(runs)} experiments, comparison at {workspace / 'comparison.md'}")
 
 
+def _tagline(spec_yaml: str) -> str:
+    """The spec file's leading comment block, used as the philosophy's tagline."""
+    lines = []
+    for line in spec_yaml.splitlines():
+        if not line.startswith("#"):
+            break
+        lines.append(line.lstrip("#").strip())
+    return " ".join(lines)
+
+
 def _display_selected(row: dict) -> dict:
     """Round engine values for display. The frontend renders, never rounds."""
     return {
@@ -234,16 +244,21 @@ def _view_model(runs: list[tuple[dict, Path]]) -> dict:
                     "rejected": [_display_rejected(r) for r in record["rejected"]],
                 }
             )
+        spec_yaml = (run_dir / "philosophy.yaml").read_text(encoding="utf-8")
         experiments.append(
             {
                 "id": manifest["id"],
                 "label": manifest["philosophy_name"],
+                "philosophy": manifest["philosophy_name"],
                 "version": manifest["philosophy_version"],
                 "start": manifest["start"],
                 "end": manifest["end"],
+                "cadence": manifest["cadence"],
                 "engine_version": manifest["engine_version"],
                 "content_hash": manifest["philosophy_hash"][:12],
                 "universe": universe_name,
+                "spec_yaml": spec_yaml,
+                "tagline": _tagline(spec_yaml),
                 "equity": [f"{p.equity:.2f}" for p in points],
                 "rebalances": rebalances,
                 "evaluation": {

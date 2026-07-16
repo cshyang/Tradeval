@@ -18,12 +18,17 @@ export type Metrics = Record<string, number | null>;
 export type Experiment = {
   id: string;
   label: string;
+  philosophy: string;
   version: string;
   start: string;
   end: string;
+  cadence: string;
   engine_version: string;
   content_hash: string;
   universe: string;
+  /** The run's real philosophy.yaml, rendered verbatim in the spec modal. */
+  spec_yaml: string;
+  tagline: string;
   equity: string[];
   rebalances: Rebalance[];
   evaluation: { metrics: Metrics; fidelity: Metrics };

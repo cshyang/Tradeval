@@ -1,7 +1,7 @@
 "use client";
 
 import { CSSProperties, useEffect, useState } from "react";
-import type { Metrics, RunData, Selected } from "../lib/types";
+import type { Experiment, RunData, Selected } from "../lib/types";
 
 const SERIF = "var(--font-serif), serif";
 const SANS = "var(--font-sans), sans-serif";
@@ -22,6 +22,7 @@ const THEMES = {
     hl: "#2c2d31", pan: "#1f2023", gain: "#8fbc9c", loss: "#c99a91", label: "☀ Light",
   },
 };
+type Theme = typeof THEMES.light;
 
 const W = 1000, H = 256, PAD_T = 10, PAD_B = 8;
 // The design had no x-padding; with real data the last rebalance lands exactly on
@@ -42,6 +43,11 @@ export default function Page() {
   const [rebIdx, setRebIdx] = useState(0);
   const [symIdx, setSymIdx] = useState(0);
   const [theme, setTheme] = useState<"light" | "dark">("light");
+  const [specOpen, setSpecOpen] = useState(false);
+  const [specIdx, setSpecIdx] = useState(0);
+  const [newOpen, setNewOpen] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newTpl, setNewTpl] = useState(0);
 
   useEffect(() => {
     fetch("runs/data.json")
@@ -53,108 +59,216 @@ export default function Page() {
       .catch((e) => console.error("failed to load runs/data.json", e));
   }, []);
 
+  // Esc closes whichever modal is open.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setSpecOpen(false);
+      setNewOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const T = THEMES[theme];
   const vars = {
     "--bg": T.bg, "--ink": T.ink, "--mut": T.mut,
     "--fnt": T.fnt, "--hl": T.hl, "--pan": T.pan,
   } as CSSProperties;
 
-  const tabStyle = (active: boolean): CSSProperties => ({
-    fontFamily: SANS, fontSize: 13.5, fontWeight: 500,
+  const navStyle = (active: boolean): CSSProperties => ({
+    fontFamily: SANS, fontSize: 13.5, fontWeight: 500, textAlign: "left",
     background: active ? T.ink : "transparent",
     color: active ? T.bg : T.mut,
-    border: "none", borderRadius: 6, padding: "7px 18px", cursor: "pointer",
+    border: "none", borderRadius: 6, padding: "8px 12px", cursor: "pointer",
   });
 
+  const selectExp = (i: number) => {
+    setExpIdx(i);
+    if (data) setRebIdx(data.experiments[i].rebalances.length - 1);
+    setSymIdx(0);
+  };
+
   return (
-    <div style={{ ...vars, fontFamily: SANS, background: "var(--bg)", color: "var(--ink)", minHeight: "100vh", display: "flex", flexDirection: "column", fontSize: 14, transition: "background 0.25s, color 0.25s" }}>
-      <header style={{ display: "flex", alignItems: "center", flexWrap: "wrap", rowGap: 8, columnGap: 16, padding: "14px 28px 12px", borderBottom: "1px solid var(--ink)", flex: "none", minWidth: 0 }}>
-        <div style={{ fontFamily: SERIF, fontSize: 23, fontWeight: 500, letterSpacing: "-0.01em", whiteSpace: "nowrap" }}>Philosophy Lab</div>
-        <div style={{ fontSize: 10, letterSpacing: "0.12em", fontWeight: 500, color: "var(--mut)", whiteSpace: "nowrap" }}>SYNTHETIC DEMO DATA</div>
-        <nav style={{ display: "flex", gap: 6, alignItems: "center", marginLeft: "auto" }}>
-          <button onClick={() => setView("replay")} style={tabStyle(view === "replay")}>Replay</button>
-          <button onClick={() => setView("compare")} style={tabStyle(view === "compare")}>Compare</button>
-          <div title="Locked in v1" style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13.5, color: "var(--mut)", opacity: 0.6, padding: "7px 14px", cursor: "not-allowed", userSelect: "none" }}>
+    <div style={{ ...vars, fontFamily: SANS, background: "var(--bg)", color: "var(--ink)", height: "100vh", display: "flex", fontSize: 14, transition: "background 0.25s, color 0.25s", overflow: "hidden" }}>
+      <aside style={{ width: 236, flex: "none", display: "flex", flexDirection: "column", borderRight: "1px solid var(--hl)", padding: "18px 0 14px", minHeight: 0 }}>
+        <div style={{ padding: "0 20px 16px", borderBottom: "1px solid var(--hl)" }}>
+          <div style={{ fontFamily: SERIF, fontSize: 21, fontWeight: 500, letterSpacing: "-0.01em" }}>Philosophy Lab</div>
+          <div style={{ fontSize: 9.5, letterSpacing: "0.12em", fontWeight: 500, color: "var(--mut)", marginTop: 5 }}>SYNTHETIC DEMO DATA</div>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: "14px 12px", borderBottom: "1px solid var(--hl)" }}>
+          <button onClick={() => setView("replay")} style={navStyle(view === "replay")}>Replay</button>
+          <button onClick={() => setView("compare")} style={navStyle(view === "compare")}>Compare</button>
+          <div title="Locked in v1" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, color: "var(--mut)", opacity: 0.6, padding: "8px 12px", cursor: "not-allowed", userSelect: "none" }}>
             Scenarios <span style={{ fontSize: 10, letterSpacing: "0.06em", border: "1px solid var(--hl)", borderRadius: 5, padding: "1px 6px" }}>v1 · locked</span>
           </div>
-        </nav>
-        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", minWidth: 0 }}>
-          <div title="Available when a broker is connected" style={{ display: "flex", alignItems: "center", gap: 8, cursor: "not-allowed", userSelect: "none", opacity: 0.55 }}>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: "14px 12px", flex: 1, minHeight: 0, overflow: "auto" }}>
+          <div style={{ fontSize: 9.5, letterSpacing: "0.12em", fontWeight: 600, color: "var(--mut)", padding: "0 12px 8px" }}>PHILOSOPHIES</div>
+          {data?.experiments.map((e, i) => {
+            const sel = i === expIdx;
+            const c = PALETTE[i % PALETTE.length];
+            const ret = e.evaluation.metrics.total_return ?? 0;
+            return (
+              <div key={e.id} onClick={() => selectExp(i)} style={{ fontFamily: SANS, textAlign: "left", background: sel ? T.pan : "transparent", borderLeft: `3px solid ${sel ? c : "transparent"}`, borderRadius: "0 6px 6px 0", padding: "9px 12px 8px", cursor: "pointer", color: "var(--ink)", opacity: sel ? 1 : 0.55, display: "flex", flexDirection: "column", gap: 3, userSelect: "none" }}>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                  <span style={{ fontFamily: SERIF, fontSize: 16, fontWeight: sel ? 500 : 400 }}>{e.label}</span>
+                  <span style={{ fontSize: 10.5, color: "var(--mut)" }}>{e.version}</span>
+                  <span style={{ fontFamily: MONO, fontSize: 12, color: ret >= 0 ? T.gain : T.loss, marginLeft: "auto" }}>{pct(ret, true)}</span>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <div style={{ width: 16, height: 3, background: c, flex: "none" }} />
+                  <span style={{ fontSize: 10.5, color: "var(--mut)" }}>{e.start.slice(0, 4)} – {e.end.slice(0, 4)}</span>
+                  <button onClick={(ev) => { ev.stopPropagation(); setSpecIdx(i); setSpecOpen(true); }} title="View YAML spec" style={{ fontFamily: MONO, fontSize: 10, color: "var(--mut)", background: "transparent", border: "1px solid var(--hl)", borderRadius: 4, padding: "1px 7px", cursor: "pointer", marginLeft: "auto" }}>spec ›</button>
+                </div>
+              </div>
+            );
+          })}
+          <button onClick={() => setNewOpen(true)} style={{ fontFamily: SANS, fontSize: 12.5, fontWeight: 500, textAlign: "left", background: "transparent", color: "var(--mut)", border: "1px dashed var(--hl)", borderRadius: 6, padding: "8px 12px", cursor: "pointer", marginTop: 8 }}>+ New philosophy</button>
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "14px 20px 0", borderTop: "1px solid var(--hl)" }}>
+          <div title="Available when a broker is connected" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "not-allowed", userSelect: "none", opacity: 0.55 }}>
             <span style={{ fontSize: 12, color: "var(--mut)" }}>Live paper mode</span>
             <div style={{ width: 32, height: 18, borderRadius: 9, background: "var(--fnt)", border: "1px solid var(--hl)", position: "relative" }}>
               <div style={{ position: "absolute", top: 2, left: 2, width: 12, height: 12, borderRadius: "50%", background: "var(--mut)" }} />
             </div>
           </div>
-          <button disabled title="Not available in this build" style={{ fontFamily: SANS, fontSize: 12.5, fontWeight: 500, color: "var(--mut)", opacity: 0.6, background: "transparent", border: "1px solid var(--hl)", borderRadius: 6, padding: "6px 14px", cursor: "not-allowed" }}>Connect broker</button>
-          <button onClick={() => setTheme(theme === "light" ? "dark" : "light")} style={{ fontFamily: SANS, fontSize: 12.5, fontWeight: 500, color: "var(--ink)", background: "transparent", border: "1px solid var(--ink)", borderRadius: 6, padding: "6px 14px", cursor: "pointer" }}>{T.label}</button>
+          <button disabled title="Not available in this build" style={{ fontFamily: SANS, fontSize: 12.5, fontWeight: 500, color: "var(--mut)", opacity: 0.6, background: "transparent", border: "1px solid var(--hl)", borderRadius: 6, padding: "7px 12px", cursor: "not-allowed" }}>Connect broker</button>
+          <button onClick={() => setTheme(theme === "light" ? "dark" : "light")} style={{ fontFamily: SANS, fontSize: 12.5, fontWeight: 500, color: "var(--ink)", background: "transparent", border: "1px solid var(--ink)", borderRadius: 6, padding: "7px 12px", cursor: "pointer" }}>{T.label}</button>
         </div>
-      </header>
+      </aside>
 
-      {!data ? (
-        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: SERIF, fontStyle: "italic", fontSize: 14, color: "var(--mut)" }}>loading run artifacts…</div>
-      ) : (
-        <Loaded
-          data={data} T={T} view={view}
-          expIdx={expIdx} rebIdx={rebIdx} symIdx={symIdx}
-          setExp={(i) => { setExpIdx(i); setRebIdx(data.experiments[i].rebalances.length - 1); setSymIdx(0); }}
-          setReb={(i) => { setRebIdx(i); setSymIdx(0); }}
-          setSym={setSymIdx}
-        />
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
+        {!data ? (
+          <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: SERIF, fontStyle: "italic", fontSize: 14, color: "var(--mut)" }}>loading run artifacts…</div>
+        ) : (
+          <>
+            <main style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, padding: "20px 28px 10px", gap: 16, overflow: "auto" }}>
+              {view === "replay" ? (
+                <Replay data={data} T={T} exp={data.experiments[expIdx]} color={PALETTE[expIdx % PALETTE.length]}
+                  rebIdx={rebIdx} symIdx={symIdx}
+                  setReb={(i) => { setRebIdx(i); setSymIdx(0); }} setSym={setSymIdx} />
+              ) : (
+                <Compare data={data} T={T} />
+              )}
+            </main>
+            <footer style={{ flex: "none", display: "flex", gap: 24, alignItems: "center", padding: "9px 28px", borderTop: "1px solid var(--hl)", fontFamily: MONO, fontSize: 10.5, color: "var(--mut)" }}>
+              <span>engine {data.experiments[expIdx].engine_version}</span>
+              <span>run {data.experiments[expIdx].content_hash}</span>
+              <span>universe {data.experiments[expIdx].universe}</span>
+              <span style={{ marginLeft: "auto", fontFamily: SERIF, fontStyle: "italic", fontSize: 12 }}>artifacts are the API — no values computed client-side</span>
+            </footer>
+          </>
+        )}
+      </div>
+
+      {data && specOpen && (
+        <SpecModal exp={data.experiments[specIdx]} T={T} color={PALETTE[specIdx % PALETTE.length]}
+          onClose={() => setSpecOpen(false)}
+          onFork={() => { setSpecOpen(false); setNewTpl(specIdx); setNewOpen(true); }} />
+      )}
+      {data && newOpen && (
+        <NewModal exps={data.experiments} T={T} name={newName} setName={setNewName}
+          tpl={newTpl} setTpl={setNewTpl} onClose={() => setNewOpen(false)} />
       )}
     </div>
   );
 }
 
-type Theme = typeof THEMES.light;
-
-function Loaded({ data, T, view, expIdx, rebIdx, symIdx, setExp, setReb, setSym }: {
-  data: RunData; T: Theme; view: "replay" | "compare";
-  expIdx: number; rebIdx: number; symIdx: number;
-  setExp: (i: number) => void; setReb: (i: number) => void; setSym: (i: number) => void;
-}) {
-  const exps = data.experiments;
-  const exp = exps[expIdx];
-  const color = PALETTE[expIdx % PALETTE.length];
-
+function Modal({ children, width, onClose }: { children: React.ReactNode; width: number; onClose: () => void }) {
   return (
-    <>
-      <div style={{ display: "flex", alignItems: "stretch", padding: "0 28px", borderBottom: "1px solid var(--hl)", flex: "none" }}>
-        {exps.map((e, i) => {
-          const sel = i === expIdx;
-          const c = PALETTE[i % PALETTE.length];
-          const ret = e.evaluation.metrics.total_return ?? 0;
-          return (
-            <button key={e.id} onClick={() => setExp(i)} style={{ fontFamily: SANS, flex: 1, textAlign: "left", background: "transparent", border: "none", borderRight: "1px solid var(--hl)", padding: "15px 22px 13px 18px", cursor: "pointer", color: "var(--ink)", opacity: sel ? 1 : 0.5, display: "flex", flexDirection: "column", gap: 4 }}>
-              <div style={{ display: "flex", alignItems: "baseline", gap: 9 }}>
-                <div style={{ width: 22, height: 3, background: c, flex: "none", alignSelf: "center" }} />
-                <span style={{ fontFamily: SERIF, fontSize: 17.5, fontWeight: sel ? 500 : 400 }}>{e.label}</span>
-                <span style={{ fontSize: 11, color: "var(--mut)" }}>{e.version}</span>
-                <span style={{ fontFamily: MONO, fontSize: 13, color: ret >= 0 ? T.gain : T.loss, marginLeft: "auto" }}>{pct(ret, true)}</span>
-              </div>
-              <div style={{ fontSize: 11.5, color: "var(--mut)" }}>{e.start} → {e.end}</div>
-            </button>
-          );
-        })}
+    <div onClick={onClose} role="presentation" style={{ position: "fixed", inset: 0, background: "rgba(20,20,18,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
+      <div onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true"
+        style={{ width, maxHeight: "86vh", overflow: "auto", background: "var(--bg)", color: "var(--ink)", border: "1px solid var(--ink)", borderRadius: 8, padding: "24px 28px", display: "flex", flexDirection: "column", gap: 16, boxShadow: "0 24px 60px rgba(0,0,0,0.35)" }}>
+        {children}
       </div>
+    </div>
+  );
+}
 
-      <main style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, padding: "18px 28px 10px", gap: 16, overflow: "auto" }}>
-        {view === "replay"
-          ? <Replay data={data} T={T} exp={exp} color={color} rebIdx={rebIdx} symIdx={symIdx} setReb={setReb} setSym={setSym} />
-          : <Compare data={data} T={T} />}
-      </main>
+function SpecModal({ exp, T, color, onClose, onFork }: {
+  exp: Experiment; T: Theme; color: string; onClose: () => void; onFork: () => void;
+}) {
+  const ret = exp.evaluation.metrics.total_return ?? 0;
+  const meta: [string, string][] = [
+    ["experiment", exp.id],
+    ["period", `${exp.start} → ${exp.end}`],
+    ["universe", exp.universe],
+    ["cadence", exp.cadence],
+    ["engine", exp.engine_version],
+    ["content hash", exp.content_hash],
+  ];
+  return (
+    <Modal width={540} onClose={onClose}>
+      <div>
+        <div style={{ width: 34, height: 4, background: color, marginBottom: 10 }} />
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+          <div style={{ fontFamily: SERIF, fontSize: 22, fontWeight: 500 }}>{exp.label}</div>
+          <span style={{ fontSize: 11, color: "var(--mut)", border: "1px solid var(--hl)", borderRadius: 5, padding: "1px 7px" }}>{exp.version}</span>
+          <span style={{ fontFamily: MONO, fontSize: 13, color: ret >= 0 ? T.gain : T.loss, marginLeft: "auto" }}>{pct(ret, true)}</span>
+        </div>
+        <div style={{ fontSize: 12.5, color: "var(--mut)", marginTop: 4, fontStyle: "italic", fontFamily: SERIF }}>{exp.tagline}</div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 24px", borderTop: "1px solid var(--hl)", paddingTop: 14 }}>
+        {meta.map(([k, v]) => (
+          <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+            <span style={{ fontSize: 11, color: "var(--mut)" }}>{k}</span>
+            <span style={{ fontFamily: MONO, fontSize: 11.5, textAlign: "right" }}>{v}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ fontSize: 10, letterSpacing: "0.12em", fontWeight: 600, color: "var(--mut)" }}>SPEC · YAML</div>
+        <div style={{ fontFamily: MONO, fontSize: 11.5, lineHeight: 1.65, whiteSpace: "pre", overflow: "auto", background: "var(--pan)", border: "1px solid var(--hl)", borderRadius: 6, padding: "14px 16px" }}>{exp.spec_yaml.trimEnd()}</div>
+      </div>
+      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", borderTop: "1px solid var(--hl)", paddingTop: 14 }}>
+        <button onClick={onFork} style={{ fontFamily: SANS, fontSize: 13, fontWeight: 500, background: "transparent", color: "var(--ink)", border: "1px solid var(--hl)", borderRadius: 6, padding: "8px 16px", cursor: "pointer" }}>Fork as new philosophy</button>
+        <button onClick={onClose} style={{ fontFamily: SANS, fontSize: 13, fontWeight: 500, background: "var(--ink)", color: "var(--bg)", border: "1px solid var(--ink)", borderRadius: 6, padding: "8px 16px", cursor: "pointer" }}>Close</button>
+      </div>
+    </Modal>
+  );
+}
 
-      <footer style={{ flex: "none", display: "flex", gap: 24, alignItems: "center", padding: "9px 28px", borderTop: "1px solid var(--hl)", fontFamily: MONO, fontSize: 10.5, color: "var(--mut)" }}>
-        <span>engine {exp.engine_version}</span>
-        <span>run {exp.content_hash}</span>
-        <span>universe {exp.universe}</span>
-        <span style={{ marginLeft: "auto", fontFamily: SERIF, fontStyle: "italic", fontSize: 12 }}>artifacts are the API — no values computed client-side</span>
-      </footer>
-    </>
+function NewModal({ exps, T, name, setName, tpl, setTpl, onClose }: {
+  exps: Experiment[]; T: Theme; name: string; setName: (v: string) => void;
+  tpl: number; setTpl: (i: number) => void; onClose: () => void;
+}) {
+  return (
+    <Modal width={460} onClose={onClose}>
+      <div>
+        <div style={{ fontFamily: SERIF, fontSize: 21, fontWeight: 500 }}>New philosophy</div>
+        <div style={{ fontSize: 12.5, color: "var(--mut)", marginTop: 4 }}>A philosophy is a versioned YAML spec — factors, constraints, cadence — run by the deterministic engine.</div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <label htmlFor="new-name" style={{ fontSize: 10, letterSpacing: "0.12em", fontWeight: 600, color: "var(--mut)" }}>NAME</label>
+        <input id="new-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. dividend-momentum"
+          style={{ fontFamily: MONO, fontSize: 13, background: "transparent", color: "var(--ink)", border: "1px solid var(--hl)", borderRadius: 6, padding: "9px 12px", outline: "none" }} />
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ fontSize: 10, letterSpacing: "0.12em", fontWeight: 600, color: "var(--mut)" }}>FORK FROM SPEC</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {exps.map((e, i) => {
+            const sel = i === tpl;
+            return (
+              <button key={e.id} onClick={() => setTpl(i)} style={{ fontFamily: SANS, flex: 1, fontSize: 12.5, fontWeight: sel ? 600 : 400, background: sel ? T.pan : "transparent", color: sel ? T.ink : T.mut, border: `1px solid ${sel ? T.ink : T.hl}`, borderRadius: 6, padding: "8px 6px", cursor: "pointer" }}>{e.label} {e.version}</button>
+            );
+          })}
+        </div>
+      </div>
+      <div style={{ fontFamily: SERIF, fontStyle: "italic", fontSize: 13, color: "var(--mut)", borderTop: "1px solid var(--hl)", paddingTop: 12 }}>Running an experiment requires the engine. This demo build reads pre-computed artifacts only.</div>
+      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+        <button onClick={onClose} style={{ fontFamily: SANS, fontSize: 13, fontWeight: 500, background: "transparent", color: "var(--ink)", border: "1px solid var(--hl)", borderRadius: 6, padding: "8px 16px", cursor: "pointer" }}>Cancel</button>
+        <button disabled title="Engine not attached in this build" style={{ fontFamily: SANS, fontSize: 13, fontWeight: 500, background: "var(--fnt)", color: "var(--mut)", border: "1px solid var(--hl)", borderRadius: 6, padding: "8px 16px", cursor: "not-allowed" }}>Run experiment — engine required</button>
+      </div>
+    </Modal>
   );
 }
 
 function Replay({ data, T, exp, color, rebIdx, symIdx, setReb, setSym }: {
-  data: RunData; T: Theme; exp: RunData["experiments"][0]; color: string;
+  data: RunData; T: Theme; exp: Experiment; color: string;
   rebIdx: number; symIdx: number; setReb: (i: number) => void; setSym: (i: number) => void;
 }) {
   const eq = exp.equity.map(parseFloat);
@@ -275,7 +389,7 @@ function Replay({ data, T, exp, color, rebIdx, symIdx, setReb, setSym }: {
                 <span style={{ fontFamily: MONO, fontSize: 12, textAlign: "right" }}>{(f.contribution >= 0 ? "+" : "") + f.contribution}</span>
               </div>
             ))}
-            <div style={{ fontSize: 11, color: "var(--mut)", marginTop: "auto", paddingTop: 10, fontStyle: "italic", fontFamily: SERIF }}>
+            <div style={{ fontSize: 12, color: "var(--mut)", marginTop: "auto", paddingTop: 10, fontStyle: "italic", fontFamily: SERIF }}>
               Score is the sum of factor contributions — engine-emitted, rendered verbatim.
             </div>
           </div>
