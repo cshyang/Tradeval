@@ -1,0 +1,27 @@
+# GARP template — growth at a reasonable price, inspired by public
+# investment principles; not a replica of any named investor's strategy.
+name: garp
+version: v1
+universe: us-large-cap-30
+cadence: weekly
+filters:
+  - metric: eps_growth_3y
+    op: gt
+    value: 0.0
+factors:
+  - name: revenue_growth_3y
+    weight: 0.30
+    direction: higher_is_better
+  - name: eps_growth_3y
+    weight: 0.30
+    direction: higher_is_better
+  - name: growth_adjusted_pe
+    weight: 0.25
+    direction: lower_is_better
+  - name: debt_to_ebitda
+    weight: 0.15
+    direction: lower_is_better
+min_factor_coverage: 0.75
+top_n: 8
+cash_buffer: 0.05
+max_position_weight: 0.15

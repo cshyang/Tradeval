@@ -1,0 +1,27 @@
+# Quality-value template — inspired by public quality/value investing
+# principles; not a replica of any named investor's strategy.
+name: quality-value
+version: v1
+universe: us-large-cap-30
+cadence: weekly
+filters:
+  - metric: debt_to_ebitda
+    op: lte
+    value: 5.0
+factors:
+  - name: roic
+    weight: 0.35
+    direction: higher_is_better
+  - name: fcf_yield
+    weight: 0.30
+    direction: higher_is_better
+  - name: debt_to_ebitda
+    weight: 0.15
+    direction: lower_is_better
+  - name: free_cash_flow_consistency
+    weight: 0.20
+    direction: higher_is_better
+min_factor_coverage: 0.75
+top_n: 8
+cash_buffer: 0.05
+max_position_weight: 0.15
