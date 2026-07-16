@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 
 import pytest
 
@@ -12,6 +12,7 @@ from tests.helpers import close_dt, make_snapshot, open_dt
 
 DECISION_DAY = date(2024, 1, 5)
 EXECUTION_DAY = date(2024, 1, 8)
+FUTURE_DAY = date(2024, 1, 9)
 PRICES = {"AAA": ("10.00", "11.00")}
 
 
@@ -63,16 +64,51 @@ def test_frame_rejects_naive_snapshot_timestamp_even_if_model_was_constructed() 
         )
 
 
-def test_frame_requires_every_decision_bar_before_every_execution_bar() -> None:
+def test_frame_rejects_future_decision_bars() -> None:
     decision = make_snapshot(DECISION_DAY, PRICES).model_copy(
-        update={
-            "as_of": datetime(2024, 1, 4, 20, tzinfo=UTC),
-            "bars": make_snapshot(EXECUTION_DAY, PRICES).bars,
-        }
+        update={"bars": make_snapshot(EXECUTION_DAY, PRICES).bars}
     )
-    with pytest.raises(ValueError, match="decision bar sessions"):
+    with pytest.raises(ValueError, match="decision.as_of session"):
         SimulationFrame(
             decision=decision,
             execution=make_snapshot(EXECUTION_DAY, PRICES),
+            execution_at=open_dt(EXECUTION_DAY),
+        )
+
+
+def test_frame_rejects_future_execution_bars() -> None:
+    execution = make_snapshot(EXECUTION_DAY, PRICES).model_copy(
+        update={"bars": make_snapshot(FUTURE_DAY, PRICES).bars}
+    )
+    with pytest.raises(ValueError, match="execution.as_of session"):
+        SimulationFrame(
+            decision=make_snapshot(DECISION_DAY, PRICES),
+            execution=execution,
+            execution_at=open_dt(EXECUTION_DAY),
+        )
+
+
+def test_frame_rejects_execution_open_on_another_date() -> None:
+    with pytest.raises(ValueError, match="execution_at must fall on"):
+        SimulationFrame(
+            decision=make_snapshot(date(2024, 1, 4), PRICES),
+            execution=make_snapshot(EXECUTION_DAY, PRICES),
+            execution_at=open_dt(DECISION_DAY),
+        )
+
+
+@pytest.mark.parametrize("empty_side", ["decision", "execution"])
+def test_frame_rejects_empty_snapshots(empty_side: str) -> None:
+    decision = make_snapshot(DECISION_DAY, PRICES)
+    execution = make_snapshot(EXECUTION_DAY, PRICES)
+    if empty_side == "decision":
+        decision = decision.model_copy(update={"bars": ()})
+    else:
+        execution = execution.model_copy(update={"bars": ()})
+
+    with pytest.raises(ValueError, match=f"{empty_side} snapshot must contain"):
+        SimulationFrame(
+            decision=decision,
+            execution=execution,
             execution_at=open_dt(EXECUTION_DAY),
         )

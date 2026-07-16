@@ -79,7 +79,7 @@ def step(
     slippage_bps: int = 0,
 ) -> PortfolioSnapshot:
     """Single portfolio transition shared by replay and forward paper modes."""
-    session_key = frame.execution.as_of.astimezone(UTC).isoformat()
+    session_key = frame.execution_session.isoformat()
     if session_key in event_log.completed_sessions():
         return portfolio
 

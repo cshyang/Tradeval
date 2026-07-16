@@ -50,7 +50,7 @@ def test_event_log_appends_and_reads_in_order(tmp_path: Path) -> None:
         "rebalance_completed",
     ]
     assert events[0]["run_id"] == "run-test"
-    assert log.completed_sessions() == {AS_OF.isoformat()}
+    assert log.completed_sessions() == {AS_OF.date().isoformat()}
 
 
 def test_decimals_serialize_as_strings_in_the_raw_file(tmp_path: Path) -> None:

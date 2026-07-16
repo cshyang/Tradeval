@@ -4,7 +4,8 @@ ledger reconstruction, and artifact shapes matching tests/fixtures/demo-run."""
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -206,6 +207,28 @@ def test_target_timestamp_must_match_decision_close(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="target.as_of"):
         runner.step(frames()[0])
+
+
+def test_same_execution_session_with_different_close_time_runs_once(
+    tmp_path: Path,
+) -> None:
+    frame = frames()[0]
+    later_close_frame = replace(
+        frame,
+        execution=frame.execution.model_copy(
+            update={"as_of": frame.execution.as_of + timedelta(hours=1)}
+        ),
+    )
+    runner = make_runner(tmp_path)
+
+    runner.step(frame)
+    runner.step(later_close_frame)
+
+    events = runner.event_log.read()
+    completions = [event for event in events if event["event_type"] == "rebalance_completed"]
+    assert len(completions) == 1
+    assert completions[0]["payload"]["session"] == SESSIONS[0].isoformat()
+    assert len((tmp_path / "equity.csv").read_text().splitlines()) == 2
 
 
 def test_repeated_session_processing_is_idempotent(tmp_path: Path) -> None:

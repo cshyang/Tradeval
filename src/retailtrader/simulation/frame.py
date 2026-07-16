@@ -37,15 +37,34 @@ class SimulationFrame:
             raise ValueError(
                 "frame timestamps must satisfy decision.as_of < execution_at < execution.as_of"
             )
-        decision_sessions = [bar.session for bar in self.decision.bars]
-        execution_sessions = [bar.session for bar in self.execution.bars]
-        if (
-            decision_sessions
-            and execution_sessions
-            and not (max(decision_sessions) < min(execution_sessions))
-        ):
+        if not self.decision.bars:
+            raise ValueError("decision snapshot must contain at least one bar")
+        if not self.execution.bars:
+            raise ValueError("execution snapshot must contain at least one bar")
+
+        decision_sessions = {bar.session for bar in self.decision.bars}
+        expected_decision_session = self.decision.as_of.date()
+        if decision_sessions != {expected_decision_session}:
             raise ValueError(
-                "all decision bar sessions must be strictly before all execution bar sessions"
+                "all decision bars must share the decision.as_of session "
+                f"{expected_decision_session.isoformat()}"
+            )
+
+        execution_sessions = {bar.session for bar in self.execution.bars}
+        expected_execution_session = self.execution.as_of.date()
+        if execution_sessions != {expected_execution_session}:
+            raise ValueError(
+                "all execution bars must share the execution.as_of session "
+                f"{expected_execution_session.isoformat()}"
+            )
+        if self.execution_at.date() != expected_execution_session:
+            raise ValueError(
+                "execution_at must fall on the execution snapshot session "
+                f"{expected_execution_session.isoformat()}"
+            )
+        if expected_decision_session >= expected_execution_session:
+            raise ValueError(
+                "the decision bar session must be strictly before the execution bar session"
             )
 
     @property
