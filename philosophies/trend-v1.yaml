@@ -1,0 +1,28 @@
+# Trend template — price momentum with a volatility brake, inspired by
+# public trend-following principles; not a replica of any named investor.
+name: trend
+version: v1
+universe: us-large-cap-30
+cadence: weekly
+filters:
+  - metric: above_sma_200
+    op: gt
+    value: 0.0
+factors:
+  - name: momentum_6m
+    weight: 0.30
+    direction: higher_is_better
+  - name: momentum_12m
+    weight: 0.30
+    direction: higher_is_better
+  - name: above_sma_200
+    weight: 0.20
+    direction: higher_is_better
+  - name: volatility_60d
+    weight: 0.20
+    direction: lower_is_better
+min_factor_coverage: 0.75
+top_n: 8
+cash_buffer: 0.05
+max_position_weight: 0.15
+max_turnover: 0.50
