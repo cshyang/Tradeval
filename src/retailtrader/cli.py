@@ -8,9 +8,10 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import typer
 import yaml
@@ -29,6 +30,7 @@ from retailtrader.evaluation.report import (
 )
 from retailtrader.philosophy import load_philosophy
 from retailtrader.scoring import generate_target
+from retailtrader.simulation.frame import SimulationFrame
 from retailtrader.simulation.runner import ExperimentRunner
 from retailtrader.storage.artifacts import read_jsonl
 
@@ -71,6 +73,31 @@ def _universe_symbols() -> tuple[str, ...]:
 
 def _rebalance_sessions(start: date, end: date) -> list[date]:
     return [d for d in synthetic.trading_sessions(start, end) if d.weekday() == 4]
+
+
+def _simulation_frames(
+    symbols: tuple[str, ...], decision_sessions: list[date]
+) -> list[SimulationFrame]:
+    """Pair each decision session with the immediately following session."""
+    market_tz = ZoneInfo("America/New_York")
+    frames = []
+    for decision_session in decision_sessions:
+        execution_sessions = synthetic.trading_sessions(
+            decision_session + timedelta(days=1),
+            decision_session + timedelta(days=7),
+        )
+        execution_session = execution_sessions[0]
+        execution_at = datetime.combine(
+            execution_session, time(9, 30), tzinfo=market_tz
+        ).astimezone(UTC)
+        frames.append(
+            SimulationFrame(
+                decision=synthetic.snapshot_for(symbols, decision_session),
+                execution=synthetic.snapshot_for(symbols, execution_session),
+                execution_at=execution_at,
+            )
+        )
+    return frames
 
 
 def _benchmarks(
@@ -131,10 +158,13 @@ def demo(
 ) -> None:
     """Replay all philosophy templates over synthetic data and compare them."""
     symbols = _universe_symbols()
-    sessions = _rebalance_sessions(start.date(), end.date())
-    typer.echo(f"building {len(sessions)} weekly snapshots for {len(symbols)} symbols…")
-    snapshots = [synthetic.snapshot_for(symbols, s) for s in sessions]
-    benchmarks = _benchmarks(snapshots, symbols)
+    decision_sessions = _rebalance_sessions(start.date(), end.date())
+    typer.echo(
+        f"building {len(decision_sessions)} weekly frames for {len(symbols)} symbols…"
+    )
+    frames = _simulation_frames(symbols, decision_sessions)
+    execution_snapshots = [frame.execution for frame in frames]
+    benchmarks = _benchmarks(execution_snapshots, symbols)
     universe_hash = hashlib.sha256(UNIVERSE_FILE.read_bytes()).hexdigest()
 
     runs = []
@@ -149,12 +179,12 @@ def demo(
             philosophy_hash=spec.content_hash or "",
             universe_hash=universe_hash,
             cadence=spec.cadence,
-            start=sessions[0],
-            end=sessions[-1],
+            start=frames[0].decision.as_of.date(),
+            end=frames[-1].execution.as_of.date(),
             created_at=datetime.now(UTC),
         )
         run_dir = workspace / exp_id
-        typer.echo(f"replaying {exp_id} over {len(snapshots)} sessions…")
+        typer.echo(f"replaying {exp_id} over {len(frames)} frames…")
         runner = ExperimentRunner(
             experiment=manifest,
             run_dir=run_dir,
@@ -164,9 +194,8 @@ def demo(
             initial_cash=INITIAL_CASH,
             slippage_bps=SLIPPAGE_BPS,
         )
-        final = runner.replay(snapshots)
-        as_of = datetime.combine(sessions[-1], time(20), tzinfo=UTC)
-        report = _evaluate_run(run_dir, manifest, as_of)
+        final = runner.replay(frames)
+        report = _evaluate_run(run_dir, manifest, frames[-1].execution.as_of)
         runs.append((manifest, report))
         typer.echo(
             f"  final equity {final.total_equity} | "
