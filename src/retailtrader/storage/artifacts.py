@@ -92,8 +92,8 @@ class RunWriter:
     def write_philosophy(self, yaml_text: str) -> None:
         self._write_durable("philosophy.yaml", yaml_text.encode())
 
-    def ensure_run_metadata(self, manifest: ExperimentManifest, philosophy_yaml: str) -> None:
-        """Validate immutable run identity, then atomically heal missing files."""
+    def validate_run_metadata(self, manifest: ExperimentManifest, philosophy_yaml: str) -> None:
+        """Validate existing immutable run files without healing missing files."""
         manifest_path = self.path("manifest.json")
         philosophy_path = self.path("philosophy.yaml")
         if manifest_path.exists():
@@ -119,9 +119,11 @@ class RunWriter:
             if existing_philosophy != philosophy_yaml.encode():
                 raise TransitionIntegrityError("immutable philosophy.yaml mismatch")
 
-        if not manifest_path.exists():
+    def heal_run_metadata(self, manifest: ExperimentManifest, philosophy_yaml: str) -> None:
+        """Atomically create files known to be missing after validation."""
+        if not self.path("manifest.json").exists():
             self.write_manifest(manifest)
-        if not philosophy_path.exists():
+        if not self.path("philosophy.yaml").exists():
             self.write_philosophy(philosophy_yaml)
         # Existing entries may themselves be visible from an interrupted write.
         self._fsync_run_directory()

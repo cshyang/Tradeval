@@ -608,6 +608,30 @@ def test_invalid_journal_in_empty_run_writes_no_public_files_or_metadata(
     assert not (destination / "initial-state.json").exists()
 
 
+@pytest.mark.parametrize("mismatch", ["manifest.json", "philosophy.yaml"])
+def test_existing_metadata_mismatch_creates_no_other_files(tmp_path: Path, mismatch: str) -> None:
+    if mismatch == "manifest.json":
+        content = json.dumps(make_experiment("different-run").model_dump(mode="json")).encode()
+    else:
+        content = b"different: true\n"
+    (tmp_path / mismatch).write_bytes(content)
+    before = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    with pytest.raises(TransitionIntegrityError):
+        make_runner(tmp_path)
+
+    after = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
 @pytest.mark.parametrize("missing", ["manifest.json", "philosophy.yaml"])
 def test_missing_run_metadata_file_is_atomically_healed(
     tmp_path: Path, missing: str, monkeypatch: pytest.MonkeyPatch

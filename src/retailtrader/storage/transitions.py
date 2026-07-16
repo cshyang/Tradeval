@@ -115,7 +115,6 @@ class TransitionStore:
         self.run_dir = run_dir
         self.directory = run_dir / "transitions"
         self.metadata_path = run_dir / "initial-state.json"
-        self.lock_path = run_dir / ".transitions.lock"
         self.failure_hook = failure_hook
         self.run_id = run_id
         self.schema_version = schema_version
@@ -124,12 +123,13 @@ class TransitionStore:
     def locked(self) -> Iterator[None]:
         """Exclusively serialize one run across threads and processes."""
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        with self.lock_path.open("a+b") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        descriptor = os.open(self.run_dir, os.O_RDONLY)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
 
     def _fail(self, point: str) -> None:
         if self.failure_hook is not None:
@@ -169,6 +169,32 @@ class TransitionStore:
         if self.directory.exists():
             self._fsync_directory()
 
+    def validate_metadata(
+        self,
+        *,
+        run_id: str,
+        schema_version: int,
+        initial_cash: Decimal,
+        created_as_of: datetime,
+    ) -> dict[str, Any] | None:
+        """Validate existing initial state without creating missing metadata."""
+        expected = {
+            "schema_version": schema_version,
+            "run_id": run_id,
+            "initial_cash": str(initial_cash),
+            "created_as_of": created_as_of.isoformat(),
+        }
+        if not self.metadata_path.exists():
+            return None
+        try:
+            existing = json.loads(self.metadata_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise TransitionIntegrityError("cannot read immutable initial-state metadata") from exc
+        if existing != expected:
+            raise TransitionIntegrityError("immutable initial-state metadata mismatch")
+        self._fsync_run_directory()
+        return expected
+
     def initialize_metadata(
         self,
         *,
@@ -177,7 +203,16 @@ class TransitionStore:
         initial_cash: Decimal,
         created_as_of: datetime,
     ) -> dict[str, Any]:
-        """Create or validate immutable initial state while the caller owns the lock."""
+        """Atomically create missing initial state after validation-only startup."""
+        arguments = {
+            "run_id": run_id,
+            "schema_version": schema_version,
+            "initial_cash": initial_cash,
+            "created_as_of": created_as_of,
+        }
+        existing = self.validate_metadata(**arguments)
+        if existing is not None:
+            return existing
         expected = {
             "schema_version": schema_version,
             "run_id": run_id,
@@ -185,18 +220,6 @@ class TransitionStore:
             "created_as_of": created_as_of.isoformat(),
         }
         content = _canonical_bytes(expected)
-        if self.metadata_path.exists():
-            try:
-                existing = json.loads(self.metadata_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise TransitionIntegrityError(
-                    "cannot read immutable initial-state metadata"
-                ) from exc
-            if existing != expected:
-                raise TransitionIntegrityError("immutable initial-state metadata mismatch")
-            self._fsync_run_directory()
-            return expected
-
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(

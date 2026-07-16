@@ -340,12 +340,18 @@ class ExperimentRunner:
         with self.transition_store.locked():
             self.transition_store.ensure_durable()
             transitions = self.transition_store.read_all()
-            metadata = self.transition_store.initialize_metadata(
-                run_id=experiment.run_id,
-                schema_version=experiment.schema_version,
-                initial_cash=initial_cash,
-                created_as_of=requested_created_as_of,
-            )
+            metadata_arguments = {
+                "run_id": experiment.run_id,
+                "schema_version": experiment.schema_version,
+                "initial_cash": initial_cash,
+                "created_as_of": requested_created_as_of,
+            }
+            metadata = self.transition_store.validate_metadata(**metadata_arguments)
+            self.writer.validate_run_metadata(experiment, philosophy_yaml)
+
+            if metadata is None:
+                metadata = self.transition_store.initialize_metadata(**metadata_arguments)
+            self.writer.heal_run_metadata(experiment, philosophy_yaml)
             created_as_of = datetime.fromisoformat(metadata["created_as_of"])
             durable_initial_cash = Decimal(metadata["initial_cash"])
             self.initial_events = [
@@ -357,7 +363,6 @@ class ExperimentRunner:
                     created_as_of,
                 )
             ]
-            self.writer.ensure_run_metadata(experiment, philosophy_yaml)
             _materialize(
                 self.event_log,
                 self.writer,
