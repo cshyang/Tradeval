@@ -24,7 +24,11 @@ from retailtrader.simulation.execution import execute_rebalance
 from retailtrader.simulation.frame import SimulationFrame
 from retailtrader.storage.artifacts import RunWriter, fill_row, portfolio_row
 from retailtrader.storage.events import EventLog, event_record, to_jsonable
-from retailtrader.storage.transitions import FailureHook, TransitionStore
+from retailtrader.storage.transitions import (
+    FailureHook,
+    TransitionIntegrityError,
+    TransitionStore,
+)
 
 TargetGenerator = Callable[
     [ExperimentManifest, MarketSnapshot],
@@ -70,11 +74,13 @@ def _materialize(
     transition_store: TransitionStore,
     initial_events: Sequence[Mapping[str, Any]],
     failure_hook: FailureHook | None = None,
+    *,
+    transitions: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    transitions = transition_store.read_all()
-    event_log.materialize(initial_events, transitions, failure_hook)
-    writer.materialize(transitions, failure_hook)
-    return transitions
+    validated = transition_store.read_all() if transitions is None else list(transitions)
+    event_log.materialize(initial_events, validated, failure_hook)
+    writer.materialize(validated, failure_hook)
+    return validated
 
 
 def step(
@@ -91,10 +97,63 @@ def step(
     slippage_bps: int = 0,
     failure_hook: FailureHook | None = None,
 ) -> PortfolioSnapshot:
-    """Compute, commit, then materialize one portfolio transition."""
+    """Compute, commit, and materialize one transition under the run lock.
+
+    This function owns the advisory lock. Helpers it calls must not acquire it
+    again because ``TransitionStore.locked`` is intentionally non-reentrant.
+    """
+    with transition_store.locked():
+        return _step_locked(
+            experiment,
+            portfolio,
+            frame,
+            generate_target,
+            event_log=event_log,
+            writer=writer,
+            transition_store=transition_store,
+            initial_events=initial_events,
+            benchmarks=benchmarks,
+            slippage_bps=slippage_bps,
+            failure_hook=failure_hook,
+        )
+
+
+def _step_locked(
+    experiment: ExperimentManifest,
+    portfolio: PortfolioSnapshot,
+    frame: SimulationFrame,
+    generate_target: TargetGenerator,
+    *,
+    event_log: EventLog,
+    writer: RunWriter,
+    transition_store: TransitionStore,
+    initial_events: Sequence[Mapping[str, Any]],
+    benchmarks: Benchmarks,
+    slippage_bps: int,
+    failure_hook: FailureHook | None,
+) -> PortfolioSnapshot:
+    """Run one transition while the caller owns the run-level lock."""
+    transitions = transition_store.read_all()
     session_key = frame.execution_session.isoformat()
-    if session_key in transition_store.completed_sessions():
-        return portfolio
+    completed = {transition["session"] for transition in transitions}
+    if transitions:
+        portfolio = portfolio_from_row(experiment.run_id, transitions[-1]["portfolio"])
+        latest_session = transitions[-1]["session"]
+        if session_key in completed:
+            _materialize(
+                event_log,
+                writer,
+                transition_store,
+                initial_events,
+                failure_hook,
+                transitions=transitions,
+            )
+            return portfolio
+        if session_key <= latest_session:
+            raise TransitionIntegrityError(
+                f"execution session {session_key} is not later than latest committed "
+                f"session {latest_session}"
+            )
 
     session = frame.execution_session
     if session not in benchmarks:
@@ -229,12 +288,15 @@ def step(
     }
 
     transition_store.commit(session, transition)
+    # Re-read and validate the canonical set before replacing any projection.
+    transitions = transition_store.read_all()
     _materialize(
         event_log,
         writer,
         transition_store,
         initial_events,
         failure_hook,
+        transitions=transitions,
     )
     return result.portfolio
 
@@ -261,11 +323,12 @@ class ExperimentRunner:
         self.failure_hook = failure_hook
         self.writer = RunWriter(run_dir)
         self.event_log = EventLog(run_dir / "events.jsonl", experiment.run_id)
-        self.transition_store = TransitionStore(run_dir, failure_hook)
-
-        if not self.writer.path("manifest.json").exists():
-            self.writer.write_manifest(experiment)
-            self.writer.write_philosophy(philosophy_yaml)
+        self.transition_store = TransitionStore(
+            run_dir,
+            failure_hook,
+            run_id=experiment.run_id,
+            schema_version=experiment.schema_version,
+        )
 
         created_as_of = datetime.combine(experiment.start, time(0), tzinfo=UTC)
         self.initial_events = [
@@ -277,21 +340,27 @@ class ExperimentRunner:
                 created_as_of,
             )
         ]
-        # Recovery always rebuilds public projections before ledger restoration.
-        _materialize(
-            self.event_log,
-            self.writer,
-            self.transition_store,
-            self.initial_events,
-        )
-        self.portfolio = self._restore(self.event_log.read(), initial_cash)
+        # Startup owns the same non-reentrant lock as step so recovery cannot
+        # publish projections from a partial view of the canonical journals.
+        with self.transition_store.locked():
+            if not self.writer.path("manifest.json").exists():
+                self.writer.write_manifest(experiment)
+                self.writer.write_philosophy(philosophy_yaml)
+            transitions = _materialize(
+                self.event_log,
+                self.writer,
+                self.transition_store,
+                self.initial_events,
+            )
+            self.portfolio = self._restore_transitions(transitions, initial_cash)
 
-    def _restore(
-        self, events: Sequence[Mapping[str, Any]], initial_cash: Decimal
+    def _restore_transitions(
+        self,
+        transitions: Sequence[Mapping[str, Any]],
+        initial_cash: Decimal,
     ) -> PortfolioSnapshot:
-        marked = [event for event in events if event["event_type"] == "portfolio_marked"]
-        if marked:
-            return portfolio_from_row(self.experiment.run_id, marked[-1]["payload"])
+        if transitions:
+            return portfolio_from_row(self.experiment.run_id, transitions[-1]["portfolio"])
         created_as_of = datetime.combine(self.experiment.start, time(0), tzinfo=UTC)
         return initial_portfolio(self.experiment, initial_cash, created_as_of)
 

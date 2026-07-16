@@ -4,8 +4,10 @@ ledger reconstruction, and artifact shapes matching tests/fixtures/demo-run."""
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -18,6 +20,7 @@ from retailtrader.simulation.ledger import replay_events
 from retailtrader.simulation.runner import ExperimentRunner
 from retailtrader.storage.artifacts import read_jsonl
 from retailtrader.storage.events import EventLog
+from retailtrader.storage.transitions import TransitionIntegrityError
 from tests.helpers import close_dt, make_experiment, make_frame, open_dt, stub_generator
 
 FIXTURE_RUN = Path(__file__).parents[2] / "tests/fixtures/demo-run/exp-trend-v1-2024"
@@ -136,9 +139,7 @@ def test_restart_recovers_after_every_derived_artifact_replacement(
 
     assert (run_dir / f"transitions/{SESSIONS[0].isoformat()}.json").exists()
     recovered = make_runner(run_dir)
-    expected = {
-        name: (run_dir / name).read_bytes() for name in ARTIFACTS + ["events.jsonl"]
-    }
+    expected = {name: (run_dir / name).read_bytes() for name in ARTIFACTS + ["events.jsonl"]}
     assert len(read_jsonl(run_dir / "fills.jsonl")) == len(
         json.loads((run_dir / f"transitions/{SESSIONS[0].isoformat()}.json").read_text())["fills"]
     )
@@ -174,7 +175,6 @@ def test_restart_accepts_atomic_journal_outcome_and_materializes_once(
     journal = json.loads(next((tmp_path / "transitions").glob("*.json")).read_text())
     assert read_jsonl(tmp_path / "fills.jsonl") == journal["fills"]
     assert len(recovered.event_log.completed_sessions()) == 1
-
 
 
 def test_target_generator_receives_only_decision_snapshot(tmp_path: Path) -> None:
@@ -309,6 +309,111 @@ def test_repeated_session_processing_is_idempotent(tmp_path: Path) -> None:
     after = {name: (tmp_path / name).read_bytes() for name in ARTIFACTS + ["events.jsonl"]}
     assert before == after
     assert portfolio == runner.portfolio
+
+
+def test_same_runner_retry_heals_post_commit_materialization_failure(
+    tmp_path: Path,
+) -> None:
+    failed = False
+
+    def fail_once(point: str) -> None:
+        nonlocal failed
+        if point == "after_artifact_replace:events.jsonl" and not failed:
+            failed = True
+            raise OSError("injected after events")
+
+    runner = make_runner(tmp_path, fail_once)
+    with pytest.raises(OSError, match="injected"):
+        runner.step(frames()[0])
+
+    restored = runner.step(frames()[0])
+    journal = json.loads((tmp_path / f"transitions/{SESSIONS[0].isoformat()}.json").read_text())
+    assert restored == runner.portfolio
+    assert restored.cash == Decimal(journal["portfolio"]["cash"])
+    assert read_jsonl(tmp_path / "portfolio.jsonl") == [journal["portfolio"]]
+    assert len(runner.event_log.completed_sessions()) == 1
+
+
+def test_out_of_order_new_session_is_rejected(tmp_path: Path) -> None:
+    runner = make_runner(tmp_path)
+    runner.step(frames()[1])
+    before = {name: (tmp_path / name).read_bytes() for name in ARTIFACTS + ["events.jsonl"]}
+
+    with pytest.raises(TransitionIntegrityError, match="not later than latest"):
+        runner.step(frames()[0])
+
+    after = {name: (tmp_path / name).read_bytes() for name in ARTIFACTS + ["events.jsonl"]}
+    assert after == before
+
+
+def test_distinct_stale_runners_serialize_and_restore_canonical_portfolio(
+    tmp_path: Path,
+) -> None:
+    first_entered_commit = threading.Event()
+    release_first = threading.Event()
+
+    def block_first(point: str) -> None:
+        if point == "before_journal_replace":
+            first_entered_commit.set()
+            if not release_first.wait(timeout=5):
+                raise TimeoutError("first transition was not released")
+
+    first = make_runner(tmp_path, block_first)
+    second = make_runner(tmp_path)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(first.step, frames()[0])
+        assert first_entered_commit.wait(timeout=5)
+        second_future = executor.submit(second.step, frames()[1])
+        try:
+            assert not second_future.done()
+        finally:
+            release_first.set()
+        first_future.result(timeout=5)
+        concurrent_final = second_future.result(timeout=5)
+
+    expected_dir = tmp_path / "expected"
+    expected_final = make_runner(expected_dir).replay(frames()[:2])
+    assert concurrent_final == expected_final
+    for name in ARTIFACTS:
+        assert (tmp_path / name).read_bytes() == (expected_dir / name).read_bytes(), name
+
+    expected_sessions = {session.isoformat() for session in SESSIONS[:2]}
+    journals = {path.stem for path in (tmp_path / "transitions").glob("*.json")}
+    completions = {
+        event["payload"]["session"]
+        for event in EventLog(tmp_path / "events.jsonl", "run-test").read()
+        if event["event_type"] == "rebalance_completed"
+    }
+    portfolio_sessions = {
+        datetime.fromisoformat(row["as_of"]).date().isoformat()
+        for row in read_jsonl(tmp_path / "portfolio.jsonl")
+    }
+    equity_sessions = {
+        line.split(",", maxsplit=1)[0]
+        for line in (tmp_path / "equity.csv").read_text().splitlines()[1:]
+    }
+    assert journals == completions == portfolio_sessions == equity_sessions == expected_sessions
+
+
+@pytest.mark.parametrize("corruption", ["missing_field", "cross_run"])
+def test_invalid_journal_cannot_replace_any_public_artifact(
+    tmp_path: Path, corruption: str
+) -> None:
+    make_runner(tmp_path).step(frames()[0])
+    public_paths = [tmp_path / name for name in ARTIFACTS + ["events.jsonl"]]
+    before = {path: path.read_bytes() for path in public_paths}
+    journal_path = tmp_path / f"transitions/{SESSIONS[0].isoformat()}.json"
+    journal = json.loads(journal_path.read_text())
+    if corruption == "missing_field":
+        del journal["portfolio"]["positions"]
+    else:
+        journal["run_id"] = "another-run"
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(TransitionIntegrityError):
+        make_runner(tmp_path)
+
+    assert {path: path.read_bytes() for path in public_paths} == before
 
 
 def test_ledger_replay_reconstructs_the_final_portfolio(tmp_path: Path) -> None:

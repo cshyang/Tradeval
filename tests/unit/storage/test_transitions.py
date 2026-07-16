@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -19,11 +20,59 @@ TRANSITION = {
     "schema_version": 1,
     "run_id": "run-test",
     "session": SESSION,
-    "events": [],
-    "decisions": [{"rank": 1}],
+    "target": {
+        "run_id": "run-test",
+        "as_of": "2024-01-05T20:00:00+00:00",
+        "cash_weight": 1.0,
+        "positions": [],
+    },
+    "events": [
+        {
+            "schema_version": 1,
+            "run_id": "run-test",
+            "event_type": "target_generated",
+            "as_of": "2024-01-05T20:00:00+00:00",
+            "created_at": "2024-01-08T20:00:01+00:00",
+            "payload": {
+                "run_id": "run-test",
+                "as_of": "2024-01-05T20:00:00+00:00",
+                "cash_weight": 1.0,
+                "positions": [],
+            },
+        },
+        {
+            "schema_version": 1,
+            "run_id": "run-test",
+            "event_type": "portfolio_marked",
+            "as_of": "2024-01-08T20:00:00+00:00",
+            "created_at": "2024-01-08T20:00:01+00:00",
+            "payload": {
+                "as_of": "2024-01-08T20:00:00+00:00",
+                "cash": "100.00",
+                "positions": [],
+                "total_equity": "100.00",
+            },
+        },
+        {
+            "schema_version": 1,
+            "run_id": "run-test",
+            "event_type": "rebalance_completed",
+            "as_of": "2024-01-08T20:00:00+00:00",
+            "created_at": "2024-01-08T20:00:01+00:00",
+            "payload": {"session": SESSION},
+        },
+    ],
+    "decisions": [],
     "orders": [],
+    "rejections": [],
     "fills": [],
-    "portfolio": {"cash": "100.00"},
+    "portfolio": {
+        "as_of": "2024-01-08T20:00:00+00:00",
+        "cash": "100.00",
+        "positions": [],
+        "total_equity": "100.00",
+    },
+    "references": {"spy_equity": "101.00", "equal_weight_equity": "99.00"},
     "equity": {
         "date": SESSION,
         "equity": "100.00",
@@ -31,6 +80,72 @@ TRANSITION = {
         "equal_weight_equity": "99.00",
     },
 }
+
+
+def _conflicting_transition() -> dict[str, object]:
+    return TRANSITION | {
+        "events": [
+            *TRANSITION["events"][:-1],
+            TRANSITION["events"][-1] | {"created_at": "2024-01-08T20:00:02+00:00"},
+        ]
+    }
+
+
+def _hold_run_lock(
+    run_dir: Path,
+    entered: multiprocessing.synchronize.Event,
+    release: multiprocessing.synchronize.Event,
+) -> None:
+    with TransitionStore(run_dir).locked():
+        entered.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("run lock was not released")
+
+
+def test_run_lock_serializes_distinct_processes(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    first_entered = context.Event()
+    release_first = context.Event()
+    second_entered = context.Event()
+    release_second = context.Event()
+    first = context.Process(target=_hold_run_lock, args=(tmp_path, first_entered, release_first))
+    second = context.Process(target=_hold_run_lock, args=(tmp_path, second_entered, release_second))
+    first.start()
+    try:
+        assert first_entered.wait(timeout=5)
+        second.start()
+        assert not second_entered.wait(timeout=0.2)
+        release_first.set()
+        assert second_entered.wait(timeout=5)
+        release_second.set()
+        second.join(timeout=5)
+        assert second.exitcode == 0
+    finally:
+        release_first.set()
+        release_second.set()
+        first.join(timeout=5)
+        if second.pid is not None:
+            second.join(timeout=5)
+    assert first.exitcode == 0
+
+
+def test_first_commit_fsyncs_run_directory_and_transition_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fsynced_inodes: list[int] = []
+    real_fsync = transition_module.os.fsync
+
+    def recording_fsync(descriptor: int) -> None:
+        if stat.S_ISDIR(transition_module.os.fstat(descriptor).st_mode):
+            fsynced_inodes.append(transition_module.os.fstat(descriptor).st_ino)
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(transition_module.os, "fsync", recording_fsync)
+    store = TransitionStore(tmp_path)
+    store.commit(SESSION, TRANSITION)
+
+    assert tmp_path.stat().st_ino in fsynced_inodes
+    assert store.directory.stat().st_ino in fsynced_inodes
 
 
 def test_commit_is_durable_and_exact_content_is_idempotent(tmp_path: Path) -> None:
@@ -48,7 +163,7 @@ def test_conflicting_content_for_session_raises_integrity_error(tmp_path: Path) 
     store = TransitionStore(tmp_path)
     store.commit(SESSION, TRANSITION)
 
-    conflicting = TRANSITION | {"fills": [{"symbol": "AAA"}]}
+    conflicting = _conflicting_transition()
     with pytest.raises(TransitionIntegrityError, match=SESSION):
         store.commit(SESSION, conflicting)
 
@@ -77,11 +192,9 @@ def _commit_concurrently_at_publication(
 def test_concurrent_conflicting_writers_cannot_overwrite(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    conflicting = TRANSITION | {"fills": [{"symbol": "AAA"}]}
+    conflicting = _conflicting_transition()
 
-    errors = _commit_concurrently_at_publication(
-        tmp_path, monkeypatch, [TRANSITION, conflicting]
-    )
+    errors = _commit_concurrently_at_publication(tmp_path, monkeypatch, [TRANSITION, conflicting])
 
     assert sum(error is None for error in errors) == 1
     integrity_errors = [error for error in errors if error is not None]
@@ -90,9 +203,10 @@ def test_concurrent_conflicting_writers_cannot_overwrite(
     store = TransitionStore(tmp_path)
     final = store.read_all()[0]
     assert final in (TRANSITION, conflicting)
-    assert store.path(SESSION).read_bytes() == (
-        json.dumps(final, indent=2, sort_keys=True) + "\n"
-    ).encode()
+    assert (
+        store.path(SESSION).read_bytes()
+        == (json.dumps(final, indent=2, sort_keys=True) + "\n").encode()
+    )
     assert list(store.directory.glob(f".{SESSION}.*")) == []
 
 
@@ -106,9 +220,10 @@ def test_concurrent_exact_duplicate_writers_are_idempotent(
     assert errors == [None, None]
     store = TransitionStore(tmp_path)
     assert store.read_all() == [TRANSITION]
-    assert store.path(SESSION).read_bytes() == (
-        json.dumps(TRANSITION, indent=2, sort_keys=True) + "\n"
-    ).encode()
+    assert (
+        store.path(SESSION).read_bytes()
+        == (json.dumps(TRANSITION, indent=2, sort_keys=True) + "\n").encode()
+    )
     assert list(store.directory.glob(f".{SESSION}.*")) == []
 
 
@@ -122,9 +237,8 @@ def test_exact_duplicate_fsyncs_directory_while_publisher_is_blocked(
     real_fsync = transition_module.os.fsync
 
     def recording_fsync(descriptor: int) -> None:
-        if (
-            threading.get_ident() == duplicate_thread
-            and stat.S_ISDIR(transition_module.os.fstat(descriptor).st_mode)
+        if threading.get_ident() == duplicate_thread and stat.S_ISDIR(
+            transition_module.os.fstat(descriptor).st_mode
         ):
             duplicate_fsynced_directory.set()
         real_fsync(descriptor)
@@ -182,8 +296,26 @@ def test_commit_failure_boundaries_leave_only_atomic_outcomes(
 
 def test_journals_are_read_in_session_order(tmp_path: Path) -> None:
     store = TransitionStore(tmp_path)
-    later = TRANSITION | {"session": "2024-01-15"}
-    store.commit("2024-01-15", later)
+    later_session = "2024-01-15"
+    later = TRANSITION | {
+        "session": later_session,
+        "portfolio": TRANSITION["portfolio"] | {"as_of": "2024-01-15T20:00:00+00:00"},
+        "equity": TRANSITION["equity"] | {"date": later_session},
+        "events": [
+            TRANSITION["events"][0],
+            TRANSITION["events"][1]
+            | {
+                "as_of": "2024-01-15T20:00:00+00:00",
+                "payload": TRANSITION["portfolio"] | {"as_of": "2024-01-15T20:00:00+00:00"},
+            },
+            TRANSITION["events"][2]
+            | {
+                "as_of": "2024-01-15T20:00:00+00:00",
+                "payload": {"session": later_session},
+            },
+        ],
+    }
+    store.commit(later_session, later)
     store.commit(SESSION, TRANSITION)
 
     assert [item["session"] for item in store.read_all()] == [SESSION, "2024-01-15"]
