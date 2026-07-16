@@ -1,0 +1,14 @@
+{
+  "id": "exp-quality-value-v1-2024",
+  "run_id": "exp-quality-value-v1-2024",
+  "schema_version": 1,
+  "philosophy_name": "quality-value",
+  "philosophy_version": "v1",
+  "philosophy_hash": "fixture-quality-value-hash",
+  "universe_hash": "fixture-us-large-cap-30",
+  "engine_version": "0.1.0",
+  "cadence": "weekly",
+  "start": "2024-01-05",
+  "end": "2026-06-26",
+  "created_at": "2026-07-16T00:00:00+00:00"
+}

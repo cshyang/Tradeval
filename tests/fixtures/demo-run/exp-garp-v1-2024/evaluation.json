@@ -1,0 +1,25 @@
+{
+  "run_id": "exp-garp-v1-2024",
+  "as_of": "2026-06-26T20:00:00+00:00",
+  "metrics": {
+    "total_return": 1.0912,
+    "cagr": 0.3463,
+    "volatility": 0.1143,
+    "sharpe": 2.66,
+    "max_drawdown": -0.0407,
+    "turnover": 0.1805,
+    "trade_count": 223,
+    "avg_holding_days": 47.4,
+    "cash_exposure": 0.05,
+    "max_concentration": 0.1188,
+    "spy_relative": 0.8541,
+    "equal_weight_relative": 0.8737
+  },
+  "fidelity": {
+    "factor_coverage": 0.9543,
+    "constraint_interventions": 4,
+    "ranking_churn": 0.162,
+    "selection_stability": 0.8211,
+    "rule_violations": 0
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "run_id": "exp-trend-v1-2024",
+  "as_of": "2026-06-26T20:00:00+00:00",
+  "metrics": {
+    "total_return": 0.8467,
+    "cagr": 0.2805,
+    "volatility": 0.1501,
+    "sharpe": 1.73,
+    "max_drawdown": -0.0925,
+    "turnover": 0.1705,
+    "trade_count": 255,
+    "avg_holding_days": 41.5,
+    "cash_exposure": 0.05,
+    "max_concentration": 0.1188,
+    "spy_relative": 0.6097,
+    "equal_weight_relative": 0.6292
+  },
+  "fidelity": {
+    "factor_coverage": 0.945,
+    "constraint_interventions": 3,
+    "ranking_churn": 0.1707,
+    "selection_stability": 0.7516,
+    "rule_violations": 0
+  }
+}

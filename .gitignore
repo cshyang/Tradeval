@@ -1,0 +1,14 @@
+.env
+data/cache/
+runs/
+.pi/sessions/
+.remember/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+.venv/
+node_modules/
+frontend/out/
+frontend/.next/

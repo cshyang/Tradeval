@@ -1,0 +1,25 @@
+{
+  "experiments": [
+    {
+      "id": "exp-trend-v1-2024",
+      "philosophy": "trend",
+      "version": "v1",
+      "start": "2024-01-05",
+      "end": "2026-06-26"
+    },
+    {
+      "id": "exp-quality-value-v1-2024",
+      "philosophy": "quality-value",
+      "version": "v1",
+      "start": "2024-01-05",
+      "end": "2026-06-26"
+    },
+    {
+      "id": "exp-garp-v1-2024",
+      "philosophy": "garp",
+      "version": "v1",
+      "start": "2024-01-05",
+      "end": "2026-06-26"
+    }
+  ]
+}
