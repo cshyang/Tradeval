@@ -21,6 +21,59 @@ RetailTrader remains useful as deterministic simulation and comparison infrastru
 - Compare agent behavior against deterministic recipes, passive benchmarks, and cash over the same window.
 - Record enough provenance to inspect and reproduce each experiment as far as the model provider permits.
 
+## Approved Product Experience
+
+AgentTrader Lab and RetailTrader appear as one product backed by separate
+services. A first-time user should be able to describe an investing philosophy,
+configure fake capital and a market, run an immediate experiment, inspect the
+agent's decisions, and start a forward-paper portfolio.
+
+The canonical user journey is:
+
+```text
+Describe -> Configure -> Preview -> Run -> Watch -> Explain -> Compare -> Fork
+```
+
+### Describe
+
+The user starts with natural language such as:
+
+```text
+I want a Buffett-inspired long-term quality-value agent.
+```
+
+The philosophy copilot uses model knowledge to draft plain-language principles,
+screening rules, cadence, and risk defaults. Persona and institution references
+are always labeled `AI-INTERPRETED`; they are not presented as authentic,
+endorsed, or proprietary strategies. Ambiguous institutions such as JPMorgan
+require the user to choose a broad style before generation.
+
+### Configure
+
+The experiment builder owns starting fake capital, market, screener rules,
+pinned and excluded symbols, historical window, cadence, cash buffer, position
+limit, turnover limit, and temporal mode. The first product supports a
+deterministic screener plus manual symbol overrides. "All available stocks"
+means all supported symbols may enter screening, not that every symbol is sent
+to the model.
+
+### Preview And Run
+
+Before execution, the UI previews candidate count, data coverage, exclusions,
+estimated model calls, and expected cost. Runtime progress names each stage:
+
+```text
+load data -> screen market -> evaluate candidates -> validate proposals
+-> apply mandate -> simulate next-open fills -> evaluate
+```
+
+### Watch, Explain, Compare, Fork
+
+Equity Replay is a result inspector, not the primary product. It sits beside
+agent proposals, evidence, holdings, cash, interventions, model usage, passive
+benchmarks, and deterministic controls. Forking creates a new version; active
+experiments are immutable.
+
 ## Non-goals
 
 - Real-money trading.
@@ -47,7 +100,10 @@ Owns point-in-time prices, fundamentals, filings, news, and research documents. 
 
 ### 4. Decision Event — what the agent proposed
 
-Owns the immutable output of one decision step: symbol, stance, confidence, thesis, evidence references, intended holding period, and abstention reason. It owns no simulated fills or later performance.
+Owns the immutable output of one decision step: symbol, buy/hold/sell stance,
+confidence, desired weight, thesis, evidence references, risks, invalidating
+conditions, intended holding period, and abstention reason. It owns no simulated
+fills or later performance.
 
 ### 5. Simulation and Ledger — what happened
 
@@ -121,9 +177,25 @@ Retrieves adjusted daily market bars and timestamped research sources. A time ga
 
 Builds only the permitted context, invokes the frozen model configuration, and stores the complete raw response. It validates the structured proposal but does not calculate fills or mutate a portfolio.
 
+The agent controls stance and desired weight. It does not create executable
+share orders. One batched call evaluates the screened candidate set at each
+decision date.
+
 ### Mandate Adapter and Simulator
 
 A deterministic adapter validates symbols, applies trade-size, concentration, cash, and turnover constraints, and produces bounded exposure. The simulator calculates orders, fills, cash, positions, and marks through one calculation path.
+
+Every proposal receives one deterministic disposition:
+
+```text
+accepted   requested weight is valid
+capped     reduced by position, turnover, or cash constraints
+rejected   unsupported symbol or mandate violation
+deferred   next execution bar is unavailable
+```
+
+The original proposal is never rewritten. Adjudication, bounded target, orders,
+fills, and portfolio state are separate hash-linked artifacts.
 
 ### Evaluator and Audit Store
 
@@ -183,13 +255,71 @@ Default tests remain offline and deterministic:
 - Repeated-trial aggregation tests.
 - An opt-in live OpenBB smoke test guarded by an explicit environment variable.
 
-## Initial Scope
+## First Vertical Slice
 
-The smallest useful first release is:
+The first end-to-end path is:
 
-1. Add adjusted daily OpenBB/Yahoo price ingestion and immutable caching to RetailTrader in an isolated feature worktree.
-2. Preserve the synthetic demo as the offline default and deterministic test fixture.
-3. Support real-price deterministic trend replay and passive controls; fundamentals-dependent recipes remain synthetic until a separate point-in-time fundamentals design is validated.
-4. Define the versioned experiment and proposal artifact schemas for the companion AgentTrader Lab.
-5. Build one cutoff-safe replay and one forward-paper workflow in the companion project.
-6. Keep the UI explicit about synthetic, cutoff-safe, hindsight, and forward-paper provenance.
+> Create a Buffett-inspired agent, give it $100,000, test it on US large
+> caps, then start paper trading from today.
+
+### Frozen Defaults
+
+```text
+Philosophy          AI-interpreted long-term quality value
+Capital             USD 100,000
+Market              US equities
+Universe            30 liquid large caps in v0
+Candidate target    approximately 12 after screening
+Cadence             monthly
+Maximum position    12%
+Maximum turnover    20%
+Modes               hindsight sandbox + forward paper
+```
+
+The user may edit capital, limits, cadence, screener rules, and symbol overrides.
+The narrow initial universe proves the workflow before introducing a broad US
+symbol master.
+
+### AI Decision Loop
+
+At each decision date:
+
+```text
+deterministic screener
+-> one batched candidate-evaluation call
+-> buy/hold/sell + confidence + desired weights + thesis + evidence
+-> deterministic mandate adjudication
+-> next-open fake execution
+-> close mark and evaluation
+```
+
+The hindsight sandbox is immediate and visibly classified as
+`HINDSIGHT SCENARIO`; it is not a track record. The forward-paper experiment
+starts from information retrieved today and runs automatically within the
+frozen mandate.
+
+### Result Workspace
+
+The first slice displays ending equity, drawdown, holdings, cash, trades,
+proposals, original and capped weights, evidence, interventions, model calls,
+tokens, latency, estimated cost, and comparisons against cash, equal weight,
+and a deterministic quality-value control.
+
+### Delivery Order
+
+1. Rebase `feature/live-market-data` onto current `main` and reconcile its
+   runner, CLI, artifact, test, and frontend plan with the merged integrity work.
+2. Finish the point-in-time real-price gateway and explicit decision/execution
+   `SimulationFrame` contract in RetailTrader.
+3. Define `MandateSpec`, `AgentProtocol`, `CandidateSet`, `DecisionProposal`,
+   and `AuditEnvelope` contracts for AgentTrader.
+4. Implement one model-backed philosophy and proposal worker using fixtures for
+   offline tests.
+5. Add experiment jobs and server-sent progress events.
+6. Build Describe -> Configure -> Preview -> Run in the unified UI.
+7. Reuse Equity Replay as the Watch/Explain result view.
+8. Add automatic forward scheduling after the hindsight workflow passes end to
+   end.
+
+Broad US symbol catalogs, multiple model providers, global assets, news, and
+fully point-in-time fundamental coverage remain later slices.
