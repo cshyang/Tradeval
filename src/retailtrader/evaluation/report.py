@@ -32,7 +32,7 @@ _METRIC_LABELS = {
     "avg_holding_days": "Average holding days",
     "cash_exposure": "Cash exposure",
     "max_concentration": "Maximum concentration",
-    "spy_relative": "Return vs SPY",
+    "synthetic_mega_cap_proxy_relative": "Return vs synthetic mega-cap proxy",
     "equal_weight_relative": "Return vs equal weight",
 }
 
@@ -53,10 +53,12 @@ def _rounded(values: dict[str, Any]) -> dict[str, Any]:
 
 
 def evaluation_payload(report: EvaluationReport) -> dict[str, Any]:
-    """Fixture-shaped evaluation.json payload (schema/engine versions omitted)."""
+    """Stable evaluation.json payload including its contract versions."""
     return {
         "run_id": report.run_id,
         "as_of": to_jsonable(report.as_of),
+        "schema_version": report.schema_version,
+        "engine_version": report.engine_version,
         "metrics": _rounded(report.metrics.model_dump()),
         "fidelity": _rounded(report.fidelity.model_dump()),
     }
@@ -86,6 +88,10 @@ def render_report_md(manifest: ExperimentManifest, report: EvaluationReport) -> 
         f"| Philosophy hash | {manifest.philosophy_hash} |",
         f"| Universe hash | {manifest.universe_hash} |",
         f"| Engine version | {manifest.engine_version} |",
+        f"| Data source | {manifest.data_source} |",
+        f"| Benchmark source | {manifest.benchmark_source} |",
+        f"| Initial cash | {manifest.initial_cash} |",
+        f"| Slippage (bps) | {manifest.slippage_bps} |",
         f"| Cadence | {manifest.cadence} |",
         f"| Window | {manifest.start.isoformat()} to {manifest.end.isoformat()} |",
         "",
@@ -119,6 +125,12 @@ def render_comparison_md(
         "# Philosophy comparison",
         "",
         DISCLAIMER,
+        "",
+        "Synthetic data and benchmark sources:",
+        *[
+            f"- {manifest.data_source}; {manifest.benchmark_source}"
+            for manifest, _ in runs
+        ],
         "",
         "| " + " | ".join(header) + " |",
         "| " + " | ".join(["---"] * len(header)) + " |",

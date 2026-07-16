@@ -56,7 +56,10 @@ def execute_rebalance(
     target: TargetPortfolio,
     snapshot: MarketSnapshot,
     slippage_bps: int = 0,
+    max_turnover: float | None = None,
 ) -> ExecutionResult:
+    if max_turnover is not None and not 0 <= max_turnover <= 1:
+        raise ValueError("max_turnover must be within [0, 1]")
     bars = {bar.symbol: bar for bar in snapshot.bars}
     held = {position.symbol: position.quantity for position in portfolio.positions}
     targeted = {position.symbol: position.weight for position in target.positions}
@@ -75,15 +78,14 @@ def execute_rebalance(
     }
 
     symbols = sorted(set(held) | set(desired))
-    sells = [
-        (symbol, held.get(symbol, 0) - desired.get(symbol, 0))
+    requested = [
+        (
+            symbol,
+            "sell" if held.get(symbol, 0) > desired.get(symbol, 0) else "buy",
+            abs(desired.get(symbol, 0) - held.get(symbol, 0)),
+        )
         for symbol in symbols
-        if held.get(symbol, 0) > desired.get(symbol, 0)
-    ]
-    buys = [
-        (symbol, desired.get(symbol, 0) - held.get(symbol, 0))
-        for symbol in symbols
-        if desired.get(symbol, 0) > held.get(symbol, 0)
+        if desired.get(symbol, 0) != held.get(symbol, 0)
     ]
 
     cash = portfolio.cash
@@ -91,6 +93,37 @@ def execute_rebalance(
     orders: list[OrderIntent] = []
     rejections: list[RejectedOrder] = []
     fills: list[FillEvent] = []
+
+    trades = requested
+    if max_turnover is not None and requested:
+        requested_gross = sum(
+            (
+                Decimal(quantity) * fill_price(bars[symbol].open, side, slippage_bps)
+                for symbol, side, quantity in requested
+            ),
+            Decimal(0),
+        )
+        turnover_budget = Decimal(2) * equity_at_open * Decimal(str(max_turnover))
+        if requested_gross > turnover_budget:
+            scale = turnover_budget / requested_gross
+            trades = []
+            for symbol, side, quantity in requested:
+                allowed = int(Decimal(quantity) * scale)
+                omitted = quantity - allowed
+                if omitted:
+                    rejections.append(
+                        RejectedOrder(
+                            symbol=symbol,
+                            side=side,
+                            requested_quantity=omitted,
+                            reason="max turnover",
+                        )
+                    )
+                if allowed:
+                    trades.append((symbol, side, allowed))
+
+    sells = [(symbol, quantity) for symbol, side, quantity in trades if side == "sell"]
+    buys = [(symbol, quantity) for symbol, side, quantity in trades if side == "buy"]
 
     for symbol, quantity in sells:
         price = fill_price(bars[symbol].open, "sell", slippage_bps)

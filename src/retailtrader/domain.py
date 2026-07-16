@@ -241,6 +241,8 @@ class PhilosophySpec(DomainModel):
         for field in ("min_factor_coverage", "cash_buffer", "max_position_weight"):
             if not 0 <= getattr(self, field) <= 1:
                 raise ValueError(f"{field} must be within [0, 1]")
+        if self.max_turnover is not None and not 0 <= self.max_turnover <= 1:
+            raise ValueError("max_turnover must be within [0, 1]")
         if self.top_n <= 0:
             raise ValueError("top_n must be positive")
         return self
@@ -259,11 +261,22 @@ class ExperimentManifest(DomainModel):
     start: date
     end: date
     created_at: datetime
+    data_source: str = "synthetic-v1"
+    benchmark_source: str = "synthetic-mega-cap-proxy-v1"
+    initial_cash: Decimal
+    slippage_bps: int
 
     @model_validator(mode="after")
     def _valid_window(self) -> ExperimentManifest:
         if self.start >= self.end:
             raise ValueError("start must precede end")
+        for field in ("data_source", "benchmark_source"):
+            if not getattr(self, field).strip():
+                raise ValueError(f"{field} must be non-empty")
+        if self.initial_cash <= 0:
+            raise ValueError("initial_cash must be positive")
+        if self.slippage_bps < 0:
+            raise ValueError("slippage_bps must be non-negative")
         return self
 
 
@@ -278,7 +291,7 @@ class EvaluationMetrics(DomainModel):
     avg_holding_days: float
     cash_exposure: float
     max_concentration: float
-    spy_relative: float
+    synthetic_mega_cap_proxy_relative: float
     equal_weight_relative: float
 
 

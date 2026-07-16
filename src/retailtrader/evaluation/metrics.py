@@ -43,7 +43,7 @@ class InsufficientHistoryError(ValueError):
 class EquityPoint:
     session: date
     equity: float
-    spy_equity: float
+    synthetic_mega_cap_proxy_equity: float
     equal_weight_equity: float
 
 
@@ -53,7 +53,9 @@ def read_equity_csv(path: Path) -> list[EquityPoint]:
             EquityPoint(
                 session=date.fromisoformat(row["date"]),
                 equity=float(row["equity"]),
-                spy_equity=float(row["spy_equity"]),
+                synthetic_mega_cap_proxy_equity=float(
+                    row["synthetic_mega_cap_proxy_equity"]
+                ),
                 equal_weight_equity=float(row["equal_weight_equity"]),
             )
             for row in csv.DictReader(handle)
@@ -210,7 +212,7 @@ def benchmark_metrics(
     *,
     values: Sequence[float],
     sessions: Sequence[date],
-    spy_values: Sequence[float],
+    synthetic_mega_cap_proxy_values: Sequence[float],
     equal_weight_values: Sequence[float],
 ) -> dict[str, float | None]:
     """Return-series metrics for a benchmark index.
@@ -230,7 +232,9 @@ def benchmark_metrics(
         "avg_holding_days": None,
         "cash_exposure": None,
         "max_concentration": None,
-        "spy_relative": round(total_return(values) - total_return(spy_values), 4),
+        "synthetic_mega_cap_proxy_relative": round(
+            total_return(values) - total_return(synthetic_mega_cap_proxy_values), 4
+        ),
         "equal_weight_relative": round(
             total_return(values) - total_return(equal_weight_values), 4
         ),
@@ -249,7 +253,7 @@ def compute_evaluation(
 ) -> EvaluationReport:
     values = [point.equity for point in equity]
     sessions = [point.session for point in equity]
-    spy_values = [point.spy_equity for point in equity]
+    proxy_values = [point.synthetic_mega_cap_proxy_equity for point in equity]
     equal_weight_values = [point.equal_weight_equity for point in equity]
 
     metrics = EvaluationMetrics(
@@ -263,7 +267,9 @@ def compute_evaluation(
         avg_holding_days=avg_holding_days(portfolios),
         cash_exposure=cash_exposure(portfolios),
         max_concentration=max_concentration(portfolios),
-        spy_relative=total_return(values) - total_return(spy_values),
+        synthetic_mega_cap_proxy_relative=(
+            total_return(values) - total_return(proxy_values)
+        ),
         equal_weight_relative=total_return(values) - total_return(equal_weight_values),
     )
     fidelity = FidelityMetrics(

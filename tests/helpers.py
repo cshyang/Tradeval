@@ -33,6 +33,8 @@ def make_experiment(run_id: str = RUN_ID) -> ExperimentManifest:
         start=date(2024, 1, 1),
         end=date(2024, 2, 1),
         created_at=datetime(2024, 1, 1, tzinfo=UTC),
+        initial_cash=Decimal("100000.00"),
+        slippage_bps=10,
     )
 
 

@@ -38,6 +38,7 @@ const money = (s: string) =>
 
 export default function Page() {
   const [data, setData] = useState<RunData | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [expIdx, setExpIdx] = useState(0);
   const [view, setView] = useState<"replay" | "compare">("replay");
   const [rebIdx, setRebIdx] = useState(0);
@@ -51,12 +52,21 @@ export default function Page() {
 
   useEffect(() => {
     fetch("runs/data.json")
-      .then((r) => r.json())
+      .then((response) => {
+        if (!response.ok) throw new Error(`artifact request failed (${response.status})`);
+        return response.json();
+      })
       .then((d: RunData) => {
+        if (!d.experiments.length || d.experiments.some((experiment) => !experiment.rebalances.length)) {
+          throw new Error("artifact export contains no complete experiments");
+        }
         setData(d);
         setRebIdx(d.experiments[0].rebalances.length - 1);
       })
-      .catch((e) => console.error("failed to load runs/data.json", e));
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : "unknown artifact error";
+        setLoadError(message);
+      });
   }, []);
 
   // Esc closes whichever modal is open.
@@ -90,8 +100,8 @@ export default function Page() {
   };
 
   return (
-    <div style={{ ...vars, fontFamily: SANS, background: "var(--bg)", color: "var(--ink)", height: "100vh", display: "flex", fontSize: 14, transition: "background 0.25s, color 0.25s", overflow: "hidden" }}>
-      <aside style={{ width: 236, flex: "none", display: "flex", flexDirection: "column", borderRight: "1px solid var(--hl)", padding: "18px 0 14px", minHeight: 0 }}>
+    <div className="app-shell" style={{ ...vars, fontFamily: SANS, background: "var(--bg)", color: "var(--ink)", height: "100vh", display: "flex", fontSize: 14, transition: "background 0.25s, color 0.25s", overflow: "hidden" }}>
+      <aside className="sidebar" style={{ width: 236, flex: "none", display: "flex", flexDirection: "column", borderRight: "1px solid var(--hl)", padding: "18px 0 14px", minHeight: 0 }}>
         <div style={{ padding: "0 20px 16px", borderBottom: "1px solid var(--hl)" }}>
           <div style={{ fontFamily: SERIF, fontSize: 21, fontWeight: 500, letterSpacing: "-0.01em" }}>Philosophy Lab</div>
           <div style={{ fontSize: 9.5, letterSpacing: "0.12em", fontWeight: 500, color: "var(--mut)", marginTop: 5 }}>SYNTHETIC DEMO DATA</div>
@@ -112,7 +122,7 @@ export default function Page() {
             const c = PALETTE[i % PALETTE.length];
             const ret = e.evaluation.metrics.total_return ?? 0;
             return (
-              <div key={e.id} onClick={() => selectExp(i)} style={{ fontFamily: SANS, textAlign: "left", background: sel ? T.pan : "transparent", borderLeft: `3px solid ${sel ? c : "transparent"}`, borderRadius: "0 6px 6px 0", padding: "9px 12px 8px", cursor: "pointer", color: "var(--ink)", opacity: sel ? 1 : 0.55, display: "flex", flexDirection: "column", gap: 3, userSelect: "none" }}>
+              <div key={e.id} role="button" tabIndex={0} aria-pressed={sel} onClick={() => selectExp(i)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectExp(i); } }} style={{ fontFamily: SANS, textAlign: "left", background: sel ? T.pan : "transparent", borderLeft: `3px solid ${sel ? c : "transparent"}`, borderRadius: "0 6px 6px 0", padding: "9px 12px 8px", cursor: "pointer", color: "var(--ink)", opacity: sel ? 1 : 0.55, display: "flex", flexDirection: "column", gap: 3, userSelect: "none" }}>
                 <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
                   <span style={{ fontFamily: SERIF, fontSize: 16, fontWeight: sel ? 500 : 400 }}>{e.label}</span>
                   <span style={{ fontSize: 10.5, color: "var(--mut)" }}>{e.version}</span>
@@ -141,8 +151,12 @@ export default function Page() {
         </div>
       </aside>
 
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
-        {!data ? (
+      <div className="content-shell" style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
+        {loadError ? (
+          <div role="alert" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 32, fontFamily: SERIF, fontSize: 15, color: "var(--mut)", textAlign: "center" }}>
+            Could not load run artifacts: {loadError}. Run the demo export command and reload.
+          </div>
+        ) : !data ? (
           <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: SERIF, fontStyle: "italic", fontSize: 14, color: "var(--mut)" }}>loading run artifacts…</div>
         ) : (
           <>
@@ -155,7 +169,7 @@ export default function Page() {
                 <Compare data={data} T={T} />
               )}
             </main>
-            <footer style={{ flex: "none", display: "flex", gap: 24, alignItems: "center", padding: "9px 28px", borderTop: "1px solid var(--hl)", fontFamily: MONO, fontSize: 10.5, color: "var(--mut)" }}>
+            <footer className="artifact-footer" style={{ flex: "none", display: "flex", gap: 24, alignItems: "center", padding: "9px 28px", borderTop: "1px solid var(--hl)", fontFamily: MONO, fontSize: 10.5, color: "var(--mut)" }}>
               <span>engine {data.experiments[expIdx].engine_version}</span>
               <span>run {data.experiments[expIdx].content_hash}</span>
               <span>universe {data.experiments[expIdx].universe}</span>
@@ -182,7 +196,7 @@ function Modal({ children, width, onClose }: { children: React.ReactNode; width:
   return (
     <div onClick={onClose} role="presentation" style={{ position: "fixed", inset: 0, background: "rgba(20,20,18,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}>
       <div onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true"
-        style={{ width, maxHeight: "86vh", overflow: "auto", background: "var(--bg)", color: "var(--ink)", border: "1px solid var(--ink)", borderRadius: 8, padding: "24px 28px", display: "flex", flexDirection: "column", gap: 16, boxShadow: "0 24px 60px rgba(0,0,0,0.35)" }}>
+        style={{ width, maxWidth: "calc(100vw - 32px)", maxHeight: "86vh", overflow: "auto", background: "var(--bg)", color: "var(--ink)", border: "1px solid var(--ink)", borderRadius: 8, padding: "24px 28px", boxSizing: "border-box", display: "flex", flexDirection: "column", gap: 16, boxShadow: "0 24px 60px rgba(0,0,0,0.35)" }}>
         {children}
       </div>
     </div>
@@ -272,9 +286,9 @@ function Replay({ data, T, exp, color, rebIdx, symIdx, setReb, setSym }: {
   rebIdx: number; symIdx: number; setReb: (i: number) => void; setSym: (i: number) => void;
 }) {
   const eq = exp.equity.map(parseFloat);
-  const spy = data.spy.map(parseFloat);
+  const proxy = data.synthetic_mega_cap_proxy.map(parseFloat);
   const ew = data.equal_weight.map(parseFloat);
-  const all = SHOW_BENCHMARKS ? eq.concat(spy, ew) : eq;
+  const all = SHOW_BENCHMARKS ? eq.concat(proxy, ew) : eq;
   const lo = Math.min(...all) * 0.99, hi = Math.max(...all) * 1.01;
   const N = eq.length;
   const X = (i: number) => PAD_X + (i / (N - 1)) * (W - 2 * PAD_X);
@@ -284,7 +298,7 @@ function Replay({ data, T, exp, color, rebIdx, symIdx, setReb, setSym }: {
 
   const rebs = exp.rebalances;
   const reb = rebs[rebIdx];
-  const vs = eq[reb.week] / spy[reb.week] - 1;
+  const vs = reb.relative_to_synthetic_mega_cap_proxy;
   // ponytail: the weekly demo cadence puts a marker on every point (130), where
   // the design assumed a sparser timeline — shrink the dot so the curve reads.
   const dotR = rebs.length > 40 ? 2.5 : 4;
@@ -306,7 +320,7 @@ function Replay({ data, T, exp, color, rebIdx, symIdx, setReb, setSym }: {
             </div>
             {SHOW_BENCHMARKS && (
               <>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}><div style={{ width: 16, height: 0, borderTop: "2px dashed var(--mut)" }} />SPY</div>
+                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}><div style={{ width: 16, height: 0, borderTop: "2px dashed var(--mut)" }} />Mega-cap proxy</div>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}><div style={{ width: 16, height: 0, borderTop: "2px dotted var(--mut)" }} />Equal-weight</div>
               </>
             )}
@@ -315,7 +329,7 @@ function Replay({ data, T, exp, color, rebIdx, symIdx, setReb, setSym }: {
         <div style={{ display: "flex", alignItems: "baseline", gap: 22, marginBottom: 6 }}>
           <div style={{ fontFamily: MONO, fontSize: 22, color: "var(--ink)" }}>{money(exp.equity[reb.week])}</div>
           <div style={{ fontFamily: MONO, fontSize: 12, color: "var(--mut)" }}>as of <span style={{ color: "var(--ink)" }}>{reb.as_of}</span></div>
-          <div style={{ fontFamily: MONO, fontSize: 12, color: vs >= 0 ? T.gain : T.loss }}>{pct(vs, true)} vs SPY</div>
+           <div style={{ fontFamily: MONO, fontSize: 12, color: vs >= 0 ? T.gain : T.loss }}>{pct(vs, true)} vs synthetic mega-cap proxy</div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginLeft: "auto" }}>
             <button onClick={() => setReb(Math.max(0, rebIdx - 1))} style={{ fontFamily: SANS, fontSize: 14, background: "transparent", color: "var(--ink)", border: "1px solid var(--hl)", borderRadius: 6, width: 30, height: 26, cursor: "pointer" }}>‹</button>
             <div style={{ fontSize: 12, color: "var(--mut)", whiteSpace: "nowrap" }}>rebalance <span style={{ color: "var(--ink)", fontWeight: 500 }}>{rebIdx + 1}</span> / {rebs.length}</div>
@@ -329,7 +343,7 @@ function Replay({ data, T, exp, color, rebIdx, symIdx, setReb, setSym }: {
           })}
           {SHOW_BENCHMARKS && (
             <>
-              <path d={path(spy)} fill="none" style={{ stroke: "var(--mut)" }} strokeWidth="1.2" strokeDasharray="6 5" />
+               <path d={path(proxy)} fill="none" style={{ stroke: "var(--mut)" }} strokeWidth="1.2" strokeDasharray="6 5" />
               <path d={path(ew)} fill="none" style={{ stroke: "var(--mut)", opacity: 0.6 }} strokeWidth="1.1" strokeDasharray="2 4" />
             </>
           )}
@@ -337,7 +351,7 @@ function Replay({ data, T, exp, color, rebIdx, symIdx, setReb, setSym }: {
           <path d={path(eq)} fill="none" style={{ stroke: "var(--ink)" }} strokeWidth="1.8" />
           <line x1={X(reb.week).toFixed(1)} x2={X(reb.week).toFixed(1)} y1="0" y2={H} stroke={color} strokeWidth="1.4" opacity="0.6" />
           {rebs.map((rb, i) => (
-            <circle key={i} onClick={() => setReb(i)} cx={X(rb.week).toFixed(1)} cy={Y(eq[rb.week]).toFixed(1)}
+            <circle key={i} role="button" tabIndex={0} aria-label={`Rebalance ${i + 1} on ${rb.as_of}`} onClick={() => setReb(i)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setReb(i); }} cx={X(rb.week).toFixed(1)} cy={Y(eq[rb.week]).toFixed(1)}
               r={i === rebIdx ? 6 : dotR} fill={i === rebIdx ? color : T.bg}
               style={{ stroke: "var(--ink)" }} strokeWidth="1.3" cursor="pointer" />
           ))}
@@ -353,7 +367,7 @@ function Replay({ data, T, exp, color, rebIdx, symIdx, setReb, setSym }: {
           <div style={{ fontFamily: MONO, fontSize: 12, color: "var(--ink)" }}>{reb.as_of}</div>
           <div style={{ fontSize: 12, color: "var(--mut)" }}>{selected.length} selected · {reb.rejected.length} rejected</div>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1.1fr 1fr", gap: 32, flex: 1, minHeight: 0, overflow: "auto" }}>
+        <div className="decision-grid" style={{ display: "grid", gridTemplateColumns: "1.1fr 1.1fr 1fr", gap: 32, flex: 1, minHeight: 0, overflow: "auto" }}>
           <div style={{ display: "flex", flexDirection: "column" }}>
             <div style={{ fontSize: 10, letterSpacing: "0.12em", fontWeight: 600, color: "var(--mut)", marginBottom: 8 }}>SELECTED · WEIGHT</div>
             {selected.length === 0 && (
@@ -420,7 +434,7 @@ function Compare({ data, T }: { data: RunData; T: Theme }) {
   const cols = exps
     .map((e, i) => ({ label: e.label, color: PALETTE[i % PALETTE.length], dot: true }))
     .concat([
-      { label: "SPY", color: T.mut, dot: false },
+      { label: "Mega-cap proxy", color: T.mut, dot: false },
       { label: "Equal-wt", color: T.mut, dot: false },
     ]);
 
@@ -445,7 +459,7 @@ function Compare({ data, T }: { data: RunData; T: Theme }) {
   const M = (k: string) => exps.map((e) => e.evaluation.metrics[k] ?? null);
   const F = (k: string) => exps.map((e) => e.evaluation.fidelity[k] ?? null);
   const row = (label: string, k: string, f: (v: number) => string, dir: number) =>
-    mk(label, [...M(k), bm.spy[k] ?? null, bm.equal_weight[k] ?? null], f, dir);
+    mk(label, [...M(k), bm.synthetic_mega_cap_proxy[k] ?? null, bm.equal_weight[k] ?? null], f, dir);
   const frow = (label: string, k: string, f: (v: number) => string, dir: number) =>
     mk(label, [...F(k), null, null], f, dir);
 
@@ -460,7 +474,7 @@ function Compare({ data, T }: { data: RunData; T: Theme }) {
     row("Avg holding (days)", "avg_holding_days", fmtNum, 0),
     row("Cash exposure", "cash_exposure", fmtPct0, 0),
     row("Max concentration", "max_concentration", fmtPct0, 0),
-    row("vs SPY", "spy_relative", fmtPctS, 1),
+    row("vs mega-cap proxy", "synthetic_mega_cap_proxy_relative", fmtPctS, 1),
     { isSection: true, label: "PHILOSOPHY FIDELITY" },
     frow("Factor coverage", "factor_coverage", fmtPct0, 1),
     frow("Constraint interventions", "constraint_interventions", fmtNum, -1),

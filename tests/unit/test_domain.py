@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from retailtrader.domain import (
+    ExperimentManifest,
     FactorObservation,
     FundamentalObservation,
     OrderIntent,
@@ -17,6 +18,25 @@ from retailtrader.domain import (
 )
 
 AS_OF = datetime(2026, 7, 16, tzinfo=UTC)
+
+
+def manifest(**overrides) -> ExperimentManifest:
+    values = {
+        "id": "run-1",
+        "run_id": "run-1",
+        "philosophy_name": "test",
+        "philosophy_version": "v1",
+        "philosophy_hash": "philosophy-hash",
+        "universe_hash": "universe-hash",
+        "cadence": "weekly",
+        "start": date(2024, 1, 1),
+        "end": date(2024, 2, 1),
+        "created_at": AS_OF,
+        "initial_cash": Decimal("100000.00"),
+        "slippage_bps": 5,
+    }
+    values.update(overrides)
+    return ExperimentManifest(**values)
 
 
 def test_rejects_future_fundamental_observation():
@@ -141,3 +161,26 @@ def test_rejects_negative_cash_snapshot():
             ),
             total_equity=Decimal("1999"),
         )
+
+
+def test_manifest_serializes_execution_provenance_deterministically():
+    payload = manifest().model_dump(mode="json")
+    assert payload["data_source"] == "synthetic-v1"
+    assert payload["benchmark_source"] == "synthetic-mega-cap-proxy-v1"
+    assert payload["initial_cash"] == "100000.00"
+    assert payload["slippage_bps"] == 5
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("data_source", "", "data_source"),
+        ("benchmark_source", "  ", "benchmark_source"),
+        ("initial_cash", Decimal("0"), "initial_cash"),
+        ("initial_cash", Decimal("-1"), "initial_cash"),
+        ("slippage_bps", -1, "slippage_bps"),
+    ],
+)
+def test_manifest_rejects_invalid_execution_provenance(field, value, message):
+    with pytest.raises(ValidationError, match=message):
+        manifest(**{field: value})
