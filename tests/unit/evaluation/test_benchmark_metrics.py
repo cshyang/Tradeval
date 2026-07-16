@@ -22,7 +22,7 @@ def test_portfolio_only_metrics_are_none_not_zero():
     result = benchmark_metrics(
         values=values,
         sessions=_sessions(4),
-        spy_values=values,
+        synthetic_mega_cap_proxy_values=values,
         equal_weight_values=values,
     )
     for key in PORTFOLIO_ONLY:
@@ -30,13 +30,16 @@ def test_portfolio_only_metrics_are_none_not_zero():
 
 
 def test_total_return_and_relatives():
-    spy = [100.0, 110.0, 120.0, 130.0]
+    proxy = [100.0, 110.0, 120.0, 130.0]
     other = [100.0, 105.0, 110.0, 115.0]
     result = benchmark_metrics(
-        values=spy, sessions=_sessions(4), spy_values=spy, equal_weight_values=other
+        values=proxy,
+        sessions=_sessions(4),
+        synthetic_mega_cap_proxy_values=proxy,
+        equal_weight_values=other,
     )
     assert result["total_return"] == 0.3
-    assert result["spy_relative"] == 0.0  # spy against itself
+    assert result["synthetic_mega_cap_proxy_relative"] == 0.0
     assert result["equal_weight_relative"] == 0.15
 
 
@@ -45,7 +48,7 @@ def test_drawdown_is_negative_and_matches_series():
     result = benchmark_metrics(
         values=values,
         sessions=_sessions(4),
-        spy_values=values,
+        synthetic_mega_cap_proxy_values=values,
         equal_weight_values=values,
     )
     assert result["max_drawdown"] == -0.25

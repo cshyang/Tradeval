@@ -73,6 +73,31 @@ def test_hash_changes_when_content_changes(tmp_path: Path):
     )
 
 
+@pytest.mark.parametrize("max_turnover", [None, 0, 0.5, 1])
+def test_max_turnover_accepts_boundaries(tmp_path: Path, max_turnover):
+    doc = base_spec()
+    doc["max_turnover"] = max_turnover
+    assert load_from(tmp_path, doc).max_turnover == max_turnover
+
+
+@pytest.mark.parametrize("max_turnover", [-0.0001, 1.0001])
+def test_max_turnover_rejects_values_outside_unit_interval(tmp_path: Path, max_turnover):
+    doc = base_spec()
+    doc["max_turnover"] = max_turnover
+    with pytest.raises(PhilosophyError, match="max_turnover"):
+        load_from(tmp_path, doc)
+
+
+def test_hash_changes_when_max_turnover_changes(tmp_path: Path):
+    uncapped = base_spec()
+    capped = base_spec()
+    capped["max_turnover"] = 0.25
+    assert (
+        load_from(tmp_path, uncapped, "uncapped.yaml").content_hash
+        != load_from(tmp_path, capped, "capped.yaml").content_hash
+    )
+
+
 def test_rejects_unknown_top_level_key(tmp_path: Path):
     doc = base_spec()
     doc["custom_python"] = "import os"

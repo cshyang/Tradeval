@@ -20,6 +20,7 @@ from retailtrader.evaluation.metrics import (
     max_concentration,
     max_drawdown,
     ranking_churn,
+    read_equity_csv,
     selection_stability,
     sharpe_ratio,
     total_return,
@@ -97,6 +98,16 @@ def test_turnover_skips_the_initial_funding_session() -> None:
     assert turnover(fills[:1], points) == 0.0
 
 
+def test_equity_csv_uses_explicit_synthetic_proxy_column(tmp_path) -> None:
+    path = tmp_path / "equity.csv"
+    path.write_text(
+        "date,equity,synthetic_mega_cap_proxy_equity,equal_weight_equity\n"
+        "2024-01-05,1000.00,1010.00,990.00\n"
+    )
+    point = read_equity_csv(path)[0]
+    assert point.synthetic_mega_cap_proxy_equity == 1010.0
+
+
 def test_avg_holding_days_hand_calculated() -> None:
     rows = [
         portfolio_row(D0, "0.00", [("AAA", 1, "1.00", "1.00")]),
@@ -163,7 +174,7 @@ def test_compute_evaluation_assembles_a_domain_report() -> None:
     assert isinstance(report, EvaluationReport)
     assert report.metrics.total_return == pytest.approx(0.21)
     assert report.metrics.trade_count == 2
-    assert report.metrics.spy_relative == pytest.approx(0.21 - 0.10)
+    assert report.metrics.synthetic_mega_cap_proxy_relative == pytest.approx(0.21 - 0.10)
     assert report.metrics.equal_weight_relative == pytest.approx(0.21 - 0.02)
     assert report.metrics.turnover == pytest.approx(110.0 / 2 / 1100.0)
     assert report.fidelity.constraint_interventions == 2

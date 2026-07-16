@@ -178,3 +178,26 @@ def snapshot_for(symbols: tuple[str, ...], session: date) -> MarketSnapshot:
     for symbol in symbols:
         funds.extend(fundamentals(symbol, as_of))
     return MarketSnapshot(as_of=as_of, bars=tuple(bars), fundamentals=tuple(funds))
+
+
+def decision_snapshot_for(
+    symbols: tuple[str, ...], execution_session: date
+) -> MarketSnapshot:
+    """Snapshot capped at the completed session before an execution open."""
+    prior_sessions = trading_sessions(EPOCH, execution_session - timedelta(days=1))
+    if not prior_sessions:
+        raise ValueError(f"no completed session before {execution_session}")
+    decision_session = prior_sessions[-1]
+    as_of = datetime.combine(decision_session, time(20), tzinfo=UTC)
+    bars = tuple(
+        bar
+        for symbol in symbols
+        for bar in _price_series(symbol)
+        if bar.session == decision_session
+    )
+    funds = tuple(
+        observation
+        for symbol in symbols
+        for observation in fundamentals(symbol, as_of)
+    )
+    return MarketSnapshot(as_of=as_of, bars=bars, fundamentals=funds)

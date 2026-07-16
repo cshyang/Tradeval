@@ -70,7 +70,9 @@ def metrics_from(curve: np.ndarray, bench: np.ndarray, ew: np.ndarray, rng: np.r
             "avg_holding_days": round(float(rng.uniform(35, 90)), 1),
             "cash_exposure": 0.05,
             "max_concentration": 0.1188,
-            "spy_relative": round(total - float(bench[-1] / bench[0] - 1), 4),
+            "synthetic_mega_cap_proxy_relative": round(
+                total - float(bench[-1] / bench[0] - 1), 4
+            ),
             "equal_weight_relative": round(total - float(ew[-1] / ew[0] - 1), 4),
         },
         "fidelity": {
@@ -86,7 +88,7 @@ def metrics_from(curve: np.ndarray, bench: np.ndarray, ew: np.ndarray, rng: np.r
 def main() -> None:
     rng = np.random.default_rng(42)
     dates = weekly_dates()
-    spy = equity_curve(rng, 0.0026, 0.015, 0.028)
+    proxy = equity_curve(rng, 0.0026, 0.015, 0.028)
     ew = equity_curve(rng, 0.0024, 0.014, 0.026)
 
     index = {"experiments": []}
@@ -121,14 +123,18 @@ def main() -> None:
                     "start": dates[0].isoformat(),
                     "end": dates[-1].isoformat(),
                     "created_at": "2026-07-16T00:00:00+00:00",
+                    "data_source": "synthetic-v1",
+                    "benchmark_source": "synthetic-mega-cap-proxy-v1",
+                    "initial_cash": "100000.00",
+                    "slippage_bps": 5,
                 },
                 indent=2,
             )
         )
 
-        rows = ["date,equity,spy_equity,equal_weight_equity"]
+        rows = ["date,equity,synthetic_mega_cap_proxy_equity,equal_weight_equity"]
         rows += [
-            f"{d.isoformat()},{curve[i]:.2f},{spy[i]:.2f},{ew[i]:.2f}"
+            f"{d.isoformat()},{curve[i]:.2f},{proxy[i]:.2f},{ew[i]:.2f}"
             for i, d in enumerate(dates)
         ]
         (exp_dir / "equity.csv").write_text("\n".join(rows) + "\n")
@@ -203,8 +209,13 @@ def main() -> None:
         )
         (exp_dir / "evaluation.json").write_text(
             json.dumps(
-                {"run_id": exp_id, "as_of": f"{dates[-1].isoformat()}T20:00:00+00:00"}
-                | metrics_from(curve, spy, ew, rng),
+                {
+                    "run_id": exp_id,
+                    "as_of": f"{dates[-1].isoformat()}T20:00:00+00:00",
+                    "schema_version": 1,
+                    "engine_version": "0.1.0",
+                }
+                | metrics_from(curve, proxy, ew, rng),
                 indent=2,
             )
         )

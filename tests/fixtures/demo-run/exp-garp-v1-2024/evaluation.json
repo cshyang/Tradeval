@@ -1,6 +1,8 @@
 {
   "run_id": "exp-garp-v1-2024",
   "as_of": "2026-06-26T20:00:00+00:00",
+  "schema_version": 1,
+  "engine_version": "0.1.0",
   "metrics": {
     "total_return": 1.0912,
     "cagr": 0.3463,
@@ -12,7 +14,7 @@
     "avg_holding_days": 47.4,
     "cash_exposure": 0.05,
     "max_concentration": 0.1188,
-    "spy_relative": 0.8541,
+    "synthetic_mega_cap_proxy_relative": 0.8541,
     "equal_weight_relative": 0.8737
   },
   "fidelity": {

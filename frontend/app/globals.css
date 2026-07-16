@@ -23,3 +23,44 @@ a:hover {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+[role="button"]:focus-visible,
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    flex-direction: column;
+    height: auto !important;
+    min-height: 100vh;
+    overflow: visible !important;
+  }
+
+  .sidebar {
+    width: 100% !important;
+    max-height: none;
+    border-right: 0 !important;
+    border-bottom: 1px solid var(--hl);
+  }
+
+  .content-shell {
+    min-height: 720px !important;
+  }
+
+  .decision-grid {
+    grid-template-columns: minmax(280px, 1fr) !important;
+  }
+
+  .decision-grid > div {
+    border-left: 0 !important;
+    padding-left: 0 !important;
+  }
+
+  .artifact-footer {
+    flex-wrap: wrap;
+    gap: 8px 16px !important;
+  }
+}

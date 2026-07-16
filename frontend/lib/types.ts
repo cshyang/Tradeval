@@ -11,6 +11,7 @@ export type Rejected = { symbol: string; reason: string; score: number | null };
 export type Rebalance = {
   week: number;
   as_of: string;
+  relative_to_synthetic_mega_cap_proxy: number;
   selected: Selected[];
   rejected: Rejected[];
 };
@@ -35,8 +36,8 @@ export type Experiment = {
 };
 export type RunData = {
   dates: string[];
-  spy: string[];
+  synthetic_mega_cap_proxy: string[];
   equal_weight: string[];
   experiments: Experiment[];
-  benchmarks: { spy: Metrics; equal_weight: Metrics };
+  benchmarks: { synthetic_mega_cap_proxy: Metrics; equal_weight: Metrics };
 };

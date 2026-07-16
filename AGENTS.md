@@ -2,18 +2,33 @@
 
 Non-negotiable:
 
-- No real-money trading.
-- No broker integration in v0.
-- No LLM-generated order decisions.
+- No real-money trading, broker integration, or LLM-generated orders.
 - No historical observation without an availability timestamp.
-- No separate backtest and paper-trading calculation paths.
-- The deterministic engine (`src/retailtrader/`) is the only component that
-  calculates scores, weights, orders, fills, cash, or positions. The frontend
-  and any LLM only display or narrate engine artifacts.
+- Replay and paper stepping use `simulation.runner.step`; never create a second path.
+- The Python engine is the only source of scores, weights, financial metrics,
+  orders, fills, cash, and positions. Frontend calculations are presentational only.
+- Never call the synthetic five-stock benchmark SPY. Its user-facing name is
+  **Synthetic mega-cap proxy**.
+- Manifest, philosophy, event, and materialized-artifact mismatches must fail
+  before writes. Do not add compatibility fallbacks that weaken resume integrity.
+- Generated paths are ignored. Update frozen fixtures only with their generator
+  and verify the complete contract suite.
+- `.remember/` is disposable local state. Durable handoff belongs in
+  `docs/demo-integrity.md`.
 
-Contract freeze: `src/retailtrader/domain.py` is the shared contract. During
-the parallel build (Phase 1), do not modify it from a worktree — surface the
-need instead.
+Acceptance:
 
-Plan of record: `docs/plans/2026-07-16-trading-philosophy-lab.md`
-(see "3-Hour Demo Build Mode" for current scope cuts).
+```bash
+uv run ruff check .
+uv run pytest -q
+uv run retailtrader demo --workspace runs/acceptance
+uv run retailtrader export --workspace runs/acceptance --out frontend/public/runs
+npm --prefix frontend audit --omit=dev --audit-level=high
+npm --prefix frontend run build
+```
+
+Plans of record:
+
+- `docs/plans/2026-07-16-trading-philosophy-lab.md`
+- `docs/plans/2026-07-16-demo-integrity-closure-design.md`
+- `docs/plans/2026-07-16-demo-integrity-closure.md`

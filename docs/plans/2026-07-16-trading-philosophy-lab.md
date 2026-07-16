@@ -23,7 +23,7 @@ Version 0 supports:
 - Quality-value, GARP, and trend templates.
 - Restricted custom YAML philosophies.
 - Historical replay and forward paper updates.
-- SPY and equal-weight benchmarks.
+- Synthetic mega-cap proxy and equal-weight benchmarks.
 - Markdown, JSON, JSONL, CSV, and Parquet artifacts.
 
 Version 0 excludes:
@@ -711,7 +711,7 @@ trade count
 average holding period
 cash exposure
 maximum concentration
-SPY-relative return
+synthetic-mega-cap-proxy-relative return
 equal-weight-relative return
 ```
 
@@ -778,7 +778,6 @@ Commands:
 
 ```text
 retailtrader philosophy validate
-retailtrader data fetch
 retailtrader experiment create
 retailtrader experiment replay
 retailtrader paper step
@@ -978,7 +977,7 @@ Copies per experiment: `manifest.json`, `philosophy.yaml`, `equity.csv`, `decisi
 ```text
 1. Philosophy switcher — select any exported experiment; swap between
    philosophies over the same period without reloading.
-2. Replay timeline — equity curve versus SPY and equal-weight benchmarks
+2. Replay timeline — equity curve versus the synthetic mega-cap proxy and equal-weight benchmark
    with a marker per rebalance event. Selecting a marker shows that date's
    decisions from decisions.jsonl: selections, rejections, and factor
    attribution.

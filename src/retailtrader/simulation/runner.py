@@ -25,14 +25,213 @@ from retailtrader.domain import (
     TargetPortfolio,
 )
 from retailtrader.simulation.execution import execute_rebalance
-from retailtrader.storage.artifacts import RunWriter, portfolio_row
-from retailtrader.storage.events import EventLog
+from retailtrader.storage.artifacts import (
+    EQUITY_HEADER,
+    RunWriter,
+    portfolio_row,
+    read_jsonl,
+    read_manifest,
+)
+from retailtrader.storage.events import EVENT_TYPES, EventLog
 
 TargetGenerator = Callable[
     [ExperimentManifest, MarketSnapshot],
     tuple[TargetPortfolio, list[dict[str, Any]]],
 ]
 Benchmarks = Mapping[date, tuple[Decimal, Decimal]]
+
+
+class ResumeMismatchError(ValueError):
+    """Persisted run identity does not match the requested experiment."""
+
+
+def _validate_event_sessions(events: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    if events[0]["event_type"] != "portfolio_created":
+        raise ResumeMismatchError("events.jsonl: portfolio_created must be first")
+
+    sessions: list[dict[str, Any]] = []
+    index = 1
+    while index < len(events):
+        target = events[index]
+        if target["event_type"] != "target_generated":
+            raise ResumeMismatchError(
+                f"events.jsonl: invalid session start at event {index}"
+            )
+        if (
+            set(target["payload"]) != {"target", "decisions"}
+            or not isinstance(target["payload"]["target"], dict)
+            or not isinstance(target["payload"]["decisions"], list)
+            or not all(
+                isinstance(decision, dict)
+                for decision in target["payload"]["decisions"]
+            )
+        ):
+            raise ResumeMismatchError(
+                f"events.jsonl: invalid target payload at event {index}"
+            )
+        session_as_of = target["as_of"]
+        index += 1
+        orders: list[dict[str, Any]] = []
+        fills: list[dict[str, Any]] = []
+        marked: dict[str, Any] | None = None
+        phase = "orders"
+
+        while index < len(events):
+            event = events[index]
+            if event["as_of"] != session_as_of:
+                raise ResumeMismatchError(
+                    f"events.jsonl: incomplete session {session_as_of}"
+                )
+            event_type = event["event_type"]
+            if event_type in {"order_created", "order_rejected"} and phase == "orders":
+                orders.append(event)
+            elif event_type == "order_filled" and phase in {"orders", "fills"}:
+                phase = "fills"
+                fills.append(event)
+            elif event_type == "portfolio_marked" and phase in {"orders", "fills"}:
+                phase = "marked"
+                marked = event
+            elif event_type == "rebalance_completed" and phase == "marked":
+                expected_session = datetime.fromisoformat(session_as_of).date().isoformat()
+                if event["payload"].get("session") != expected_session:
+                    raise ResumeMismatchError(
+                        f"events.jsonl: completed session payload mismatch at {session_as_of}"
+                    )
+                sessions.append(
+                    {
+                        "as_of": session_as_of,
+                        "target": target,
+                        "orders": orders,
+                        "fills": fills,
+                        "portfolio": marked,
+                    }
+                )
+                index += 1
+                break
+            else:
+                raise ResumeMismatchError(
+                    f"events.jsonl: invalid event sequence for session {session_as_of}"
+                )
+            index += 1
+        else:
+            raise ResumeMismatchError(f"events.jsonl: incomplete session {session_as_of}")
+
+    completed = [datetime.fromisoformat(session["as_of"]) for session in sessions]
+    if completed != sorted(set(completed)):
+        raise ResumeMismatchError("completed sessions are not chronological and unique")
+    return sessions
+
+
+def _read_materialized_jsonl(run_dir: Path, name: str) -> list[dict[str, Any]]:
+    path = run_dir / name
+    if not path.is_file():
+        raise ResumeMismatchError(f"missing materialized artifact: {name}")
+    try:
+        rows = read_jsonl(path)
+    except Exception as exc:
+        raise ResumeMismatchError(f"{name}: malformed JSONL: {exc}") from exc
+    if not all(isinstance(row, dict) for row in rows):
+        raise ResumeMismatchError(f"{name}: rows must be objects")
+    return rows
+
+
+def _validate_materialized_artifacts(
+    run_dir: Path,
+    sessions: Sequence[dict[str, Any]],
+    benchmarks: Benchmarks,
+) -> None:
+    decisions = _read_materialized_jsonl(run_dir, "decisions.jsonl")
+    expected_decisions = [
+        decision
+        for session in sessions
+        for decision in session["target"]["payload"].get("decisions", [])
+    ]
+    if decisions != expected_decisions:
+        raise ResumeMismatchError("decisions.jsonl: rows do not match target events")
+
+    orders = _read_materialized_jsonl(run_dir, "orders.jsonl")
+    expected_orders = []
+    for session in sessions:
+        for event in session["orders"]:
+            payload = event["payload"]
+            if event["event_type"] == "order_rejected":
+                expected_orders.append(payload)
+            else:
+                expected_orders.append(
+                    {
+                        "as_of": payload["as_of"],
+                        "symbol": payload["symbol"],
+                        "side": payload["side"],
+                        "quantity": payload["quantity"],
+                        "status": "created",
+                        "reason": None,
+                    }
+                )
+    if orders != expected_orders:
+        raise ResumeMismatchError("orders.jsonl: rows do not match order events")
+
+    fills = _read_materialized_jsonl(run_dir, "fills.jsonl")
+    expected_fills = [
+        {
+            "symbol": event["payload"]["symbol"],
+            "side": event["payload"]["side"],
+            "quantity": event["payload"]["quantity"],
+            "fill_price": event["payload"]["fill_price"],
+            "filled_at": event["payload"]["filled_at"],
+        }
+        for session in sessions
+        for event in session["fills"]
+    ]
+    if fills != expected_fills:
+        raise ResumeMismatchError("fills.jsonl: rows do not match fill events")
+
+    portfolios = _read_materialized_jsonl(run_dir, "portfolio.jsonl")
+    expected_portfolios = [session["portfolio"]["payload"] for session in sessions]
+    if portfolios != expected_portfolios:
+        raise ResumeMismatchError("portfolio.jsonl: rows do not match portfolio events")
+
+    equity_path = run_dir / "equity.csv"
+    if not equity_path.is_file():
+        raise ResumeMismatchError("missing materialized artifact: equity.csv")
+    try:
+        lines = equity_path.read_text(encoding="utf-8").splitlines()
+        if not lines or lines[0] != EQUITY_HEADER:
+            raise ValueError("unexpected header")
+        rows = [line.split(",") for line in lines[1:]]
+        if any(len(row) != 4 for row in rows):
+            raise ValueError("expected four columns")
+    except Exception as exc:
+        raise ResumeMismatchError(f"equity.csv: malformed CSV: {exc}") from exc
+
+    expected_equity = []
+    for session in sessions:
+        session_date = datetime.fromisoformat(session["as_of"]).date()
+        if session_date not in benchmarks:
+            raise ResumeMismatchError(f"equity.csv: missing benchmark for {session_date}")
+        proxy_equity, equal_weight_equity = benchmarks[session_date]
+        expected_equity.append(
+            [
+                session_date.isoformat(),
+                f'{Decimal(session["portfolio"]["payload"]["total_equity"]):.2f}',
+                f"{proxy_equity:.2f}",
+                f"{equal_weight_equity:.2f}",
+            ]
+        )
+    if rows != expected_equity:
+        raise ResumeMismatchError("equity.csv: rows do not match completed sessions")
+
+
+def remaining_session_suffix(
+    completed_sessions: Sequence[date], scheduled_sessions: Sequence[date]
+) -> tuple[date, ...]:
+    """Validate completed sessions as a prefix and return the unprocessed suffix."""
+    completed = tuple(completed_sessions)
+    scheduled = tuple(scheduled_sessions)
+    if scheduled != tuple(sorted(set(scheduled))):
+        raise ResumeMismatchError("scheduled sessions must be chronological and unique")
+    if completed != scheduled[: len(completed)]:
+        raise ResumeMismatchError("completed sessions are not a chronological prefix")
+    return scheduled[len(completed) :]
 
 
 def initial_portfolio(
@@ -76,6 +275,7 @@ def step(
     writer: RunWriter,
     benchmarks: Benchmarks,
     slippage_bps: int = 0,
+    max_turnover: float | None = None,
 ) -> PortfolioSnapshot:
     """Single portfolio transition shared by replay and forward paper modes."""
     session_key = snapshot.as_of.astimezone(UTC).isoformat()
@@ -85,14 +285,24 @@ def step(
     session = snapshot.as_of.date()
     if session not in benchmarks:
         raise ValueError(f"missing benchmark equity for session {session}")
-    spy_equity, equal_weight_equity = benchmarks[session]
+    proxy_equity, equal_weight_equity = benchmarks[session]
 
     target, decisions = generate_target(experiment, snapshot)
-    event_log.append("target_generated", snapshot.as_of, target.model_dump())
+    event_log.append(
+        "target_generated",
+        snapshot.as_of,
+        {"target": target.model_dump(), "decisions": decisions},
+    )
     for record in decisions:
         writer.append_decision(record)
 
-    result = execute_rebalance(portfolio, target, snapshot, slippage_bps=slippage_bps)
+    result = execute_rebalance(
+        portfolio,
+        target,
+        snapshot,
+        slippage_bps=slippage_bps,
+        max_turnover=max_turnover,
+    )
 
     for order in result.orders:
         event_log.append("order_created", snapshot.as_of, order.model_dump())
@@ -124,7 +334,7 @@ def step(
     event_log.append("portfolio_marked", snapshot.as_of, portfolio_row(result.portfolio))
     writer.append_portfolio(result.portfolio)
     writer.append_equity_row(
-        session, result.portfolio.total_equity, spy_equity, equal_weight_equity
+        session, result.portfolio.total_equity, proxy_equity, equal_weight_equity
     )
     event_log.append("rebalance_completed", snapshot.as_of, {"session": session})
     return result.portfolio
@@ -141,38 +351,157 @@ class ExperimentRunner:
         generate_target: TargetGenerator,
         benchmarks: Benchmarks,
         philosophy_yaml: str,
-        initial_cash: Decimal,
-        slippage_bps: int = 0,
+        max_turnover: float | None = None,
     ) -> None:
-        self.experiment = experiment
+        if max_turnover is not None and not 0 <= max_turnover <= 1:
+            raise ValueError("max_turnover must be within [0, 1]")
         self.generate_target = generate_target
         self.benchmarks = benchmarks
-        self.slippage_bps = slippage_bps
-        self.writer = RunWriter(run_dir)
-        self.event_log = EventLog(run_dir / "events.jsonl", experiment.run_id)
+        self.max_turnover = max_turnover
+        existing = run_dir.exists() and any(run_dir.iterdir())
 
-        events = self.event_log.read()
-        if not events:
+        if existing:
+            persisted, events = self._validate_resume(
+                run_dir, experiment, philosophy_yaml, max_turnover, benchmarks
+            )
+            self.experiment = persisted
+            self.writer = RunWriter(run_dir)
+            self.event_log = EventLog(run_dir / "events.jsonl", persisted.run_id)
+            try:
+                self.portfolio = self._restore(events)
+            except Exception as exc:
+                raise ResumeMismatchError(f"events.jsonl: invalid portfolio state: {exc}") from exc
+        else:
+            self.experiment = experiment
+            self.writer = RunWriter(run_dir)
+            self.event_log = EventLog(run_dir / "events.jsonl", experiment.run_id)
             self.writer.write_manifest(experiment)
             self.writer.write_philosophy(philosophy_yaml)
+            self.writer.initialize_materialized()
             created_as_of = datetime.combine(experiment.start, time(0), tzinfo=UTC)
-            self.portfolio = initial_portfolio(experiment, initial_cash, created_as_of)
+            self.portfolio = initial_portfolio(
+                experiment, experiment.initial_cash, created_as_of
+            )
             self.event_log.append(
                 "portfolio_created",
                 created_as_of,
-                {"cash": initial_cash, "as_of": created_as_of},
+                {
+                    "cash": experiment.initial_cash,
+                    "as_of": created_as_of,
+                    "slippage_bps": experiment.slippage_bps,
+                    "max_turnover": max_turnover,
+                },
             )
-        else:
-            self.portfolio = self._restore(events, initial_cash)
 
-    def _restore(
-        self, events: Sequence[Mapping[str, Any]], initial_cash: Decimal
-    ) -> PortfolioSnapshot:
+    @staticmethod
+    def _validate_resume(
+        run_dir: Path,
+        incoming: ExperimentManifest,
+        philosophy_yaml: str,
+        max_turnover: float | None,
+        benchmarks: Benchmarks,
+    ) -> tuple[ExperimentManifest, list[dict[str, Any]]]:
+        required = ("manifest.json", "philosophy.yaml", "events.jsonl")
+        for name in required:
+            if not (run_dir / name).is_file():
+                raise ResumeMismatchError(f"missing identity artifact: {name}")
+
+        try:
+            persisted = read_manifest(run_dir / "manifest.json")
+        except Exception as exc:
+            raise ResumeMismatchError(f"manifest.json: {exc}") from exc
+
+        for field in ExperimentManifest.model_fields:
+            if field == "created_at":
+                continue
+            if getattr(persisted, field) != getattr(incoming, field):
+                raise ResumeMismatchError(f"manifest {field} mismatch")
+
+        try:
+            persisted_yaml = (run_dir / "philosophy.yaml").read_text(encoding="utf-8")
+        except Exception as exc:
+            raise ResumeMismatchError(f"philosophy.yaml: {exc}") from exc
+        if persisted_yaml != philosophy_yaml:
+            raise ResumeMismatchError("philosophy.yaml mismatch")
+
+        try:
+            events = EventLog(run_dir / "events.jsonl", persisted.run_id).read()
+        except Exception as exc:
+            raise ResumeMismatchError(f"events.jsonl: {exc}") from exc
+        if not events:
+            raise ResumeMismatchError("events.jsonl: event log is empty")
+
+        required_keys = {
+            "schema_version",
+            "run_id",
+            "event_type",
+            "as_of",
+            "created_at",
+            "payload",
+        }
+        for index, event in enumerate(events):
+            if not isinstance(event, dict) or set(event) != required_keys:
+                raise ResumeMismatchError(f"events.jsonl event {index}: invalid envelope")
+            if event["run_id"] != persisted.run_id:
+                raise ResumeMismatchError(f"events.jsonl event {index}: run_id mismatch")
+            if event["schema_version"] != persisted.schema_version:
+                raise ResumeMismatchError(
+                    f"events.jsonl event {index}: schema_version mismatch"
+                )
+            if event["event_type"] not in EVENT_TYPES:
+                raise ResumeMismatchError(f"events.jsonl event {index}: unknown event_type")
+            try:
+                as_of = datetime.fromisoformat(event["as_of"])
+                created_at = datetime.fromisoformat(event["created_at"])
+            except (TypeError, ValueError) as exc:
+                raise ResumeMismatchError(
+                    f"events.jsonl event {index}: invalid timestamp"
+                ) from exc
+            if as_of.tzinfo is None or created_at.tzinfo is None:
+                raise ResumeMismatchError(
+                    f"events.jsonl event {index}: timestamp must be timezone-aware"
+                )
+            if not isinstance(event["payload"], dict):
+                raise ResumeMismatchError(f"events.jsonl event {index}: invalid payload")
+
+        created = [event for event in events if event["event_type"] == "portfolio_created"]
+        if len(created) != 1:
+            raise ResumeMismatchError("events.jsonl: expected one portfolio_created event")
+        try:
+            created_cash = Decimal(created[0]["payload"]["cash"])
+            datetime.fromisoformat(created[0]["payload"]["as_of"])
+            created_slippage = int(created[0]["payload"]["slippage_bps"])
+            created_max_turnover = created[0]["payload"]["max_turnover"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ResumeMismatchError("events.jsonl: invalid portfolio_created payload") from exc
+        if created_cash != persisted.initial_cash:
+            raise ResumeMismatchError("events.jsonl initial_cash mismatch")
+        if created_slippage != persisted.slippage_bps:
+            raise ResumeMismatchError("events.jsonl slippage_bps mismatch")
+        if created_max_turnover != max_turnover:
+            raise ResumeMismatchError("events.jsonl max_turnover mismatch")
+
+        sessions = _validate_event_sessions(events)
+        try:
+            _validate_materialized_artifacts(run_dir, sessions, benchmarks)
+        except ResumeMismatchError:
+            raise
+        except Exception as exc:
+            raise ResumeMismatchError(
+                f"events.jsonl: invalid materialization payload: {exc}"
+            ) from exc
+        return persisted, events
+
+    def _restore(self, events: Sequence[Mapping[str, Any]]) -> PortfolioSnapshot:
         marked = [event for event in events if event["event_type"] == "portfolio_marked"]
         if marked:
             return portfolio_from_row(self.experiment.run_id, marked[-1]["payload"])
-        created_as_of = datetime.combine(self.experiment.start, time(0), tzinfo=UTC)
-        return initial_portfolio(self.experiment, initial_cash, created_as_of)
+        created = next(event for event in events if event["event_type"] == "portfolio_created")
+        return initial_portfolio(
+            self.experiment,
+            Decimal(created["payload"]["cash"]),
+            datetime.fromisoformat(created["payload"]["as_of"]),
+        )
 
     def step(self, snapshot: MarketSnapshot) -> PortfolioSnapshot:
         """Forward paper mode: process one newly completed session."""
@@ -184,12 +513,24 @@ class ExperimentRunner:
             event_log=self.event_log,
             writer=self.writer,
             benchmarks=self.benchmarks,
-            slippage_bps=self.slippage_bps,
+            slippage_bps=self.experiment.slippage_bps,
+            max_turnover=self.max_turnover,
         )
         return self.portfolio
 
     def replay(self, snapshots: Sequence[MarketSnapshot]) -> PortfolioSnapshot:
         """Historical replay mode: loop the same transition over all snapshots."""
-        for snapshot in sorted(snapshots, key=lambda item: item.as_of):
+        ordered = sorted(snapshots, key=lambda item: item.as_of)
+        completed = [
+            datetime.fromisoformat(event["as_of"]).date()
+            for event in self.event_log.read()
+            if event["event_type"] == "rebalance_completed"
+        ]
+        remaining = set(
+            remaining_session_suffix(completed, [item.as_of.date() for item in ordered])
+        )
+        for snapshot in ordered:
+            if snapshot.as_of.date() not in remaining:
+                continue
             self.step(snapshot)
         return self.portfolio

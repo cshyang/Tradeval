@@ -170,3 +170,121 @@ def test_missing_bar_for_held_or_targeted_symbol_raises() -> None:
             make_target({"AAA": 0.5, "BBB": 0.4}, cash_weight=0.1),
             snapshot,
         )
+
+
+def rotation_portfolio(cash: str = "0.00") -> PortfolioSnapshot:
+    return PortfolioSnapshot(
+        run_id=RUN_ID,
+        as_of=close_dt(DAY0),
+        cash=Decimal(cash),
+        positions=(
+            Position(
+                symbol="AAA",
+                quantity=100,
+                price=Decimal("10.00"),
+                value=Decimal("1000.00"),
+            ),
+        ),
+        total_equity=Decimal(cash) + Decimal("1000.00"),
+    )
+
+
+def fill_turnover(result, opening_equity: Decimal) -> Decimal:
+    gross = sum(
+        (Decimal(fill.quantity) * fill.fill_price for fill in result.fills),
+        Decimal(0),
+    )
+    return gross / (Decimal(2) * opening_equity)
+
+
+def test_max_turnover_scales_a_rotation_and_rejects_omitted_quantities() -> None:
+    snapshot = make_snapshot(DAY1, {"AAA": ("10.00", "10.00"), "BBB": ("10.00", "10.00")})
+    result = execute_rebalance(
+        rotation_portfolio(),
+        make_target({"BBB": 1.0}, cash_weight=0.0),
+        snapshot,
+        max_turnover=0.25,
+    )
+
+    assert [(f.symbol, f.side, f.quantity) for f in result.fills] == [
+        ("AAA", "sell", 25),
+        ("BBB", "buy", 25),
+    ]
+    assert [(r.symbol, r.side, r.requested_quantity, r.reason) for r in result.rejections] == [
+        ("AAA", "sell", 75, "max turnover"),
+        ("BBB", "buy", 75, "max turnover"),
+    ]
+    assert fill_turnover(result, Decimal("1000.00")) == Decimal("0.25")
+    assert result.portfolio.cash == Decimal("0.00")
+
+
+def test_zero_turnover_cap_produces_no_fills() -> None:
+    snapshot = make_snapshot(DAY1, {"AAA": ("10.00", "11.00"), "BBB": ("10.00", "9.00")})
+    result = execute_rebalance(
+        rotation_portfolio(),
+        make_target({"BBB": 1.0}, cash_weight=0.0),
+        snapshot,
+        max_turnover=0,
+    )
+
+    assert result.fills == ()
+    assert result.orders == ()
+    assert [(r.symbol, r.requested_quantity, r.reason) for r in result.rejections] == [
+        ("AAA", 100, "max turnover"),
+        ("BBB", 100, "max turnover"),
+    ]
+    assert result.portfolio.cash == Decimal("0.00")
+    assert [(p.symbol, p.quantity, p.value) for p in result.portfolio.positions] == [
+        ("AAA", 100, Decimal("1100.00"))
+    ]
+
+
+def test_none_turnover_cap_preserves_uncapped_behavior() -> None:
+    snapshot = make_snapshot(DAY1, {"AAA": ("10.00", "10.00"), "BBB": ("10.00", "10.00")})
+    uncapped = execute_rebalance(
+        rotation_portfolio(), make_target({"BBB": 1.0}, cash_weight=0.0), snapshot
+    )
+    explicit_none = execute_rebalance(
+        rotation_portfolio(),
+        make_target({"BBB": 1.0}, cash_weight=0.0),
+        snapshot,
+        max_turnover=None,
+    )
+    assert explicit_none == uncapped
+    assert [(f.symbol, f.quantity) for f in explicit_none.fills] == [("AAA", 100), ("BBB", 100)]
+
+
+def test_turnover_uses_slippage_adjusted_notional_and_never_exceeds_cap() -> None:
+    snapshot = make_snapshot(DAY1, {"AAA": ("10.00", "10.00"), "BBB": ("10.00", "10.00")})
+    result = execute_rebalance(
+        rotation_portfolio("10.00"),
+        make_target({"BBB": 1.0}, cash_weight=0.0),
+        snapshot,
+        slippage_bps=100,
+        max_turnover=0.25,
+    )
+
+    assert [(f.symbol, f.side, f.quantity, f.fill_price) for f in result.fills] == [
+        ("AAA", "sell", 25, Decimal("9.90")),
+        ("BBB", "buy", 25, Decimal("10.10")),
+    ]
+    assert fill_turnover(result, Decimal("1010.00")) <= Decimal("0.25")
+    assert result.portfolio.cash == Decimal("5.00")
+    assert result.portfolio.cash >= 0
+
+
+def test_turnover_rejections_are_in_ascending_symbol_order() -> None:
+    snapshot = make_snapshot(
+        DAY1,
+        {"AAA": ("10.00", "10.00"), "BBB": ("10.00", "10.00"), "CCC": ("10.00", "10.00")},
+    )
+    result = execute_rebalance(
+        cash_portfolio("1000.00"),
+        make_target({"CCC": 0.4, "AAA": 0.3, "BBB": 0.3}, cash_weight=0.0),
+        snapshot,
+        max_turnover=0.2,
+    )
+    assert [r.symbol for r in result.rejections] == ["AAA", "BBB", "CCC"]
+    assert all(r.reason == "max turnover" for r in result.rejections)
+    assert [f.symbol for f in result.fills] == ["AAA", "BBB", "CCC"]
+    assert fill_turnover(result, Decimal("1000.00")) <= Decimal("0.2")

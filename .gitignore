@@ -16,3 +16,4 @@ frontend/.next/
 .playwright-mcp/
 frontend/public/runs/
 .worktrees/
+*.tsbuildinfo

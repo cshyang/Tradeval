@@ -1,4 +1,4 @@
-date,equity,spy_equity,equal_weight_equity
+date,equity,synthetic_mega_cap_proxy_equity,equal_weight_equity
 2024-01-05,100000.00,100000.00,100000.00
 2024-01-12,100078.97,100717.08,98942.79
 2024-01-19,97549.69,99407.78,98640.29
