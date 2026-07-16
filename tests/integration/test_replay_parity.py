@@ -106,6 +106,44 @@ def test_replay_and_forward_paper_produce_identical_artifacts(tmp_path: Path) ->
     assert events_without_created_at(replay_dir) == events_without_created_at(forward_dir)
 
 
+def test_target_generator_receives_only_decision_snapshot(tmp_path: Path) -> None:
+    decision_prices = PRICES[SESSIONS[0]]
+    execution_prices = {symbol: ("9999.00", "8888.00") for symbol in decision_prices} | {
+        "EXEC_ONLY": ("7777.00", "6666.00")
+    }
+    frame = make_frame(
+        DECISION_SESSIONS[0],
+        SESSIONS[0],
+        decision_prices,
+        execution_prices,
+    )
+    received = []
+
+    def recording_generator(experiment, snapshot):
+        received.append(snapshot)
+        return stub_generator(experiment, snapshot)
+
+    runner = ExperimentRunner(
+        experiment=make_experiment(),
+        run_dir=tmp_path,
+        generate_target=recording_generator,
+        benchmarks=BENCHMARKS,
+        philosophy_yaml=PHILOSOPHY_YAML,
+        initial_cash=Decimal("100000.00"),
+    )
+    runner.step(frame)
+
+    assert received == [frame.decision]
+    assert received[0] is frame.decision
+    assert received[0].as_of == close_dt(DECISION_SESSIONS[0])
+    assert {bar.session for bar in received[0].bars} == {DECISION_SESSIONS[0]}
+    assert {
+        bar.symbol: (str(bar.open), str(bar.close)) for bar in received[0].bars
+    } == decision_prices
+    assert "EXEC_ONLY" not in {bar.symbol for bar in received[0].bars}
+    assert all(bar.open != Decimal("9999.00") for bar in received[0].bars)
+
+
 def test_decision_execution_timestamps_and_open_price_sizing(tmp_path: Path) -> None:
     base_frame = frames()[0]
     changed_prices = {
