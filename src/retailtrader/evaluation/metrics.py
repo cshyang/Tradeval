@@ -206,6 +206,37 @@ def rule_violations(portfolios: Sequence[Mapping[str, Any]]) -> int:
     return sum(Decimal(row["cash"]) < 0 for row in portfolios)
 
 
+def benchmark_metrics(
+    *,
+    values: Sequence[float],
+    sessions: Sequence[date],
+    spy_values: Sequence[float],
+    equal_weight_values: Sequence[float],
+) -> dict[str, float | None]:
+    """Return-series metrics for a benchmark index.
+
+    A benchmark has no orders, positions, or cash, so the portfolio-specific
+    metrics are None rather than a misleading zero. The comparison view renders
+    those cells as an em dash.
+    """
+    return {
+        "total_return": round(total_return(values), 4),
+        "cagr": round(cagr(values, sessions), 4),
+        "volatility": round(annualized_volatility(values, sessions), 4),
+        "sharpe": round(sharpe_ratio(values, sessions), 4),
+        "max_drawdown": round(max_drawdown(values), 4),
+        "turnover": None,
+        "trade_count": None,
+        "avg_holding_days": None,
+        "cash_exposure": None,
+        "max_concentration": None,
+        "spy_relative": round(total_return(values) - total_return(spy_values), 4),
+        "equal_weight_relative": round(
+            total_return(values) - total_return(equal_weight_values), 4
+        ),
+    }
+
+
 def compute_evaluation(
     *,
     run_id: str,

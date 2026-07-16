@@ -13,3 +13,5 @@ node_modules/
 frontend/out/
 frontend/.next/
 .claude/
+.playwright-mcp/
+frontend/public/runs/

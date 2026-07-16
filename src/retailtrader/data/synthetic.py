@@ -120,6 +120,9 @@ def _fundamental_series(symbol: str) -> tuple[FundamentalObservation, ...]:
     }
     margin = rng.uniform(0.08, 0.30)
     growth = rng.uniform(-0.01, 0.05)
+    # Earnings compound on their own path (buybacks, operating leverage), so eps
+    # growth must not be a copy of revenue growth — the factor panel shows both.
+    eps_growth = growth + rng.uniform(-0.015, 0.025)
 
     observations = []
     for i, period_end in enumerate(_quarter_ends(HORIZON)):
@@ -133,7 +136,7 @@ def _fundamental_series(symbol: str) -> tuple[FundamentalObservation, ...]:
             "market_cap": base["market_cap"] * factor,
             "total_debt": base["total_debt"],
             "ebitda": revenue * margin * 1.3,
-            "eps": base["eps"] * factor,
+            "eps": base["eps"] * (1 + eps_growth) ** i,
             "pe": base["pe"] * rng.uniform(0.9, 1.1),
         }
         available = datetime.combine(

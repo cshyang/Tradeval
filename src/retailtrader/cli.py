@@ -17,7 +17,11 @@ import yaml
 
 from retailtrader.data import synthetic
 from retailtrader.domain import ExperimentManifest, MarketSnapshot, PhilosophySpec
-from retailtrader.evaluation.metrics import compute_evaluation, read_equity_csv
+from retailtrader.evaluation.metrics import (
+    benchmark_metrics,
+    compute_evaluation,
+    read_equity_csv,
+)
 from retailtrader.evaluation.report import (
     write_comparison_md,
     write_evaluation_json,
@@ -174,13 +178,114 @@ def demo(
     typer.echo(f"done: {len(runs)} experiments, comparison at {workspace / 'comparison.md'}")
 
 
+def _display_selected(row: dict) -> dict:
+    """Round engine values for display. The frontend renders, never rounds."""
+    return {
+        "symbol": row["symbol"],
+        "weight": round(row["weight"], 6),
+        "score": round(row["score"], 4),
+        "factors": [
+            {
+                "name": f["name"],
+                "value": None if f["value"] is None else round(f["value"], 3),
+                "contribution": round(f["contribution"], 4),
+            }
+            for f in row["factors"]
+        ],
+    }
+
+
+def _display_rejected(row: dict) -> dict:
+    return {
+        "symbol": row["symbol"],
+        "reason": row["reason"],
+        "score": None if row["score"] is None else round(row["score"], 4),
+    }
+
+
+def _view_model(runs: list[tuple[dict, Path]]) -> dict:
+    """Aggregate exported artifacts into the frontend's single-fetch view model.
+
+    Every number here is copied from an engine artifact or computed by the
+    engine's own metric functions — the frontend renders, it never calculates.
+    """
+    universe_name = yaml.safe_load(UNIVERSE_FILE.read_text(encoding="utf-8"))["name"]
+    _, first_dir = runs[0]
+    equity_points = read_equity_csv(first_dir / "equity.csv")
+    dates = [p.session.isoformat() for p in equity_points]
+    spy = [f"{p.spy_equity:.2f}" for p in equity_points]
+    equal_weight = [f"{p.equal_weight_equity:.2f}" for p in equity_points]
+    week_of = {d: i for i, d in enumerate(dates)}
+
+    experiments = []
+    for manifest, run_dir in runs:
+        points = read_equity_csv(run_dir / "equity.csv")
+        evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
+        rebalances = []
+        for record in read_jsonl(run_dir / "decisions.jsonl"):
+            session = record["as_of"][:10]
+            if session not in week_of:
+                continue
+            rebalances.append(
+                {
+                    "week": week_of[session],
+                    "as_of": session,
+                    "selected": [_display_selected(s) for s in record["selected"]],
+                    "rejected": [_display_rejected(r) for r in record["rejected"]],
+                }
+            )
+        experiments.append(
+            {
+                "id": manifest["id"],
+                "label": manifest["philosophy_name"],
+                "version": manifest["philosophy_version"],
+                "start": manifest["start"],
+                "end": manifest["end"],
+                "engine_version": manifest["engine_version"],
+                "content_hash": manifest["philosophy_hash"][:12],
+                "universe": universe_name,
+                "equity": [f"{p.equity:.2f}" for p in points],
+                "rebalances": rebalances,
+                "evaluation": {
+                    "metrics": evaluation["metrics"],
+                    "fidelity": evaluation["fidelity"],
+                },
+            }
+        )
+
+    sessions = [p.session for p in equity_points]
+    spy_values = [p.spy_equity for p in equity_points]
+    ew_values = [p.equal_weight_equity for p in equity_points]
+    return {
+        "dates": dates,
+        "spy": spy,
+        "equal_weight": equal_weight,
+        "experiments": experiments,
+        "benchmarks": {
+            "spy": benchmark_metrics(
+                values=spy_values,
+                sessions=sessions,
+                spy_values=spy_values,
+                equal_weight_values=ew_values,
+            ),
+            "equal_weight": benchmark_metrics(
+                values=ew_values,
+                sessions=sessions,
+                spy_values=spy_values,
+                equal_weight_values=ew_values,
+            ),
+        },
+    }
+
+
 @app.command()
 def export(
     workspace: Path = typer.Option(Path("runs/demo")),
     out: Path = typer.Option(Path("frontend/public/runs")),
 ) -> None:
-    """Copy run artifacts to the frontend's static data directory."""
+    """Copy run artifacts and the aggregated view model to the frontend."""
     experiments = []
+    runs: list[tuple[dict, Path]] = []
     for manifest_path in sorted(workspace.glob("*/manifest.json")):
         run_dir = manifest_path.parent
         missing = [n for n in EXPORT_ARTIFACTS if not (run_dir / n).exists()]
@@ -192,6 +297,7 @@ def export(
         dest.mkdir(parents=True, exist_ok=True)
         for name in EXPORT_ARTIFACTS:
             shutil.copy2(run_dir / name, dest / name)
+        runs.append((manifest, run_dir))
         experiments.append(
             {
                 "id": manifest["id"],
@@ -206,7 +312,9 @@ def export(
         raise typer.Exit(code=1)
     out.mkdir(parents=True, exist_ok=True)
     (out / "index.json").write_text(json.dumps({"experiments": experiments}, indent=2))
-    typer.echo(f"exported {len(experiments)} experiments to {out}")
+    (out / "data.json").write_text(json.dumps(_view_model(runs), separators=(",", ":")))
+    size_mb = (out / "data.json").stat().st_size / 1_000_000
+    typer.echo(f"exported {len(experiments)} experiments to {out} (data.json {size_mb:.1f} MB)")
 
 
 if __name__ == "__main__":
