@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -109,6 +110,46 @@ def test_concurrent_exact_duplicate_writers_are_idempotent(
         json.dumps(TRANSITION, indent=2, sort_keys=True) + "\n"
     ).encode()
     assert list(store.directory.glob(f".{SESSION}.*")) == []
+
+
+def test_exact_duplicate_fsyncs_directory_while_publisher_is_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    published = threading.Event()
+    release_publisher = threading.Event()
+    duplicate_fsynced_directory = threading.Event()
+    duplicate_thread = threading.get_ident()
+    real_fsync = transition_module.os.fsync
+
+    def recording_fsync(descriptor: int) -> None:
+        if (
+            threading.get_ident() == duplicate_thread
+            and stat.S_ISDIR(transition_module.os.fstat(descriptor).st_mode)
+        ):
+            duplicate_fsynced_directory.set()
+        real_fsync(descriptor)
+
+    def block_after_publication(point: str) -> None:
+        if point == "after_journal_replace":
+            published.set()
+            if not release_publisher.wait(timeout=5):
+                raise TimeoutError("publisher was not released")
+
+    monkeypatch.setattr(transition_module.os, "fsync", recording_fsync)
+    publisher_store = TransitionStore(tmp_path, failure_hook=block_after_publication)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        publisher = executor.submit(publisher_store.commit, SESSION, TRANSITION)
+        try:
+            assert published.wait(timeout=5)
+            assert not publisher.done()
+
+            TransitionStore(tmp_path).commit(SESSION, TRANSITION.copy())
+
+            assert duplicate_fsynced_directory.is_set()
+            assert not publisher.done()
+        finally:
+            release_publisher.set()
+        publisher.result(timeout=5)
 
 
 @pytest.mark.parametrize(

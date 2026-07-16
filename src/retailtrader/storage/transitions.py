@@ -46,6 +46,15 @@ class TransitionStore:
     def path(self, session: date | str) -> Path:
         return self.directory / f"{_session_key(session)}.json"
 
+    def _fsync_directory(self) -> None:
+        self._fail("before_parent_fsync")
+        descriptor = os.open(self.directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        self._fail("after_parent_fsync")
+
     def commit(self, session: date | str, transition: Mapping[str, Any]) -> None:
         """Durably publish a journal, accepting only exact idempotent retries."""
         session_key = _session_key(session)
@@ -53,14 +62,15 @@ class TransitionStore:
             raise ValueError("transition session does not match journal session")
         content = _canonical_bytes(transition)
         target = self.path(session_key)
+        self.directory.mkdir(parents=True, exist_ok=True)
         if target.exists():
             if target.read_bytes() == content:
+                self._fsync_directory()
                 return
             raise TransitionIntegrityError(
                 f"conflicting transition journal for session {session_key}"
             )
 
-        self.directory.mkdir(parents=True, exist_ok=True)
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -79,6 +89,9 @@ class TransitionStore:
                 os.link(temporary, target)
             except FileExistsError:
                 if target.read_bytes() == content:
+                    temporary.unlink()
+                    temporary = None
+                    self._fsync_directory()
                     return
                 raise TransitionIntegrityError(
                     f"conflicting transition journal for session {session_key}"
@@ -86,13 +99,7 @@ class TransitionStore:
             temporary.unlink()
             temporary = None
             self._fail("after_journal_replace")
-            self._fail("before_parent_fsync")
-            descriptor = os.open(self.directory, os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            self._fail("after_parent_fsync")
+            self._fsync_directory()
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
