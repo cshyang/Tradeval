@@ -113,6 +113,7 @@ class TransitionStore:
     ) -> None:
         self.run_dir = run_dir
         self.directory = run_dir / "transitions"
+        self.metadata_path = run_dir / "initial-state.json"
         self.lock_path = run_dir / ".transitions.lock"
         self.failure_hook = failure_hook
         self.run_id = run_id
@@ -146,6 +147,13 @@ class TransitionStore:
         finally:
             os.close(descriptor)
 
+    def _fsync_run_directory(self) -> None:
+        descriptor = os.open(self.run_dir, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
     def _fsync_directory(self) -> None:
         self._fail("before_parent_fsync")
         descriptor = os.open(self.directory, os.O_RDONLY)
@@ -154,6 +162,61 @@ class TransitionStore:
         finally:
             os.close(descriptor)
         self._fail("after_parent_fsync")
+
+    def initialize_metadata(
+        self,
+        *,
+        run_id: str,
+        schema_version: int,
+        initial_cash: Decimal,
+        created_as_of: datetime,
+    ) -> dict[str, Any]:
+        """Create or validate immutable initial state while the caller owns the lock."""
+        expected = {
+            "schema_version": schema_version,
+            "run_id": run_id,
+            "initial_cash": str(initial_cash),
+            "created_as_of": created_as_of.isoformat(),
+        }
+        content = _canonical_bytes(expected)
+        if self.metadata_path.exists():
+            try:
+                existing = json.loads(self.metadata_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise TransitionIntegrityError(
+                    "cannot read immutable initial-state metadata"
+                ) from exc
+            if existing != expected:
+                raise TransitionIntegrityError("immutable initial-state metadata mismatch")
+            self._fsync_run_directory()
+            return expected
+
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=self.run_dir,
+                prefix=".initial-state.",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(temporary, self.metadata_path)
+            except FileExistsError:
+                if self.metadata_path.read_bytes() != content:
+                    raise TransitionIntegrityError(
+                        "immutable initial-state metadata mismatch"
+                    ) from None
+            temporary.unlink()
+            temporary = None
+            self._fsync_run_directory()
+            return expected
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def commit(self, session: date | str, transition: Mapping[str, Any]) -> None:
         """Durably publish a journal, accepting only exact idempotent retries."""
@@ -282,7 +345,7 @@ class TransitionStore:
         events = _list(value, "events")
         allowed = EVENT_TYPES - {"portfolio_created"}
         completions = []
-        event_counts: dict[str, int] = {}
+        event_payloads: dict[str, list[dict[str, Any]]] = {}
         for index, raw in enumerate(events):
             event = _mapping(raw, f"events[{index}]")
             _require(
@@ -304,7 +367,7 @@ class TransitionStore:
             _datetime(event["created_at"], f"events[{index}].created_at")
             payload = _mapping(event["payload"], f"events[{index}].payload")
             event_type = event["event_type"]
-            event_counts[event_type] = event_counts.get(event_type, 0) + 1
+            event_payloads.setdefault(event_type, []).append(dict(payload))
             try:
                 if event_type == "target_generated":
                     target = TargetPortfolio.model_validate(payload)
@@ -338,15 +401,51 @@ class TransitionStore:
                 raise TransitionIntegrityError(f"events[{index}].as_of does not match session")
             if event_type == "rebalance_completed":
                 completions.append(event)
-                if payload.get("session") != session:
+                if payload != {"session": session}:
                     raise TransitionIntegrityError("rebalance_completed session mismatch")
         for required_type in ("target_generated", "portfolio_marked", "rebalance_completed"):
-            if event_counts.get(required_type) != 1:
+            if len(event_payloads.get(required_type, [])) != 1:
                 raise TransitionIntegrityError(
                     f"journal must contain exactly one {required_type} event"
                 )
-        if event_counts.get("order_filled", 0) != len(transition["fills"]):
-            raise TransitionIntegrityError("order_filled event count does not match fills")
+
+        created_orders = [order for order in transition["orders"] if order["status"] == "created"]
+        created_event_rows = [
+            {
+                "as_of": payload["as_of"],
+                "symbol": payload["symbol"],
+                "side": payload["side"],
+                "quantity": payload["quantity"],
+                "status": "created",
+                "reason": None,
+            }
+            for payload in event_payloads.get("order_created", [])
+        ]
+        if created_event_rows != created_orders:
+            raise TransitionIntegrityError("order_created events do not match created order rows")
+
+        rejected_orders = [order for order in transition["orders"] if order["status"] == "rejected"]
+        rejected_events = event_payloads.get("order_rejected", [])
+        if rejected_events != rejected_orders:
+            raise TransitionIntegrityError("order_rejected events do not match rejected order rows")
+        rejection_rows = [
+            {
+                "symbol": order["symbol"],
+                "side": order["side"],
+                "requested_quantity": order["quantity"],
+                "reason": order["reason"],
+            }
+            for order in rejected_orders
+        ]
+        if rejection_rows != transition["rejections"]:
+            raise TransitionIntegrityError("rejected order rows do not match rejection records")
+
+        fill_event_rows = [
+            {key: item for key, item in payload.items() if key != "run_id"}
+            for payload in event_payloads.get("order_filled", [])
+        ]
+        if fill_event_rows != transition["fills"]:
+            raise TransitionIntegrityError("order_filled events do not match fill rows")
         if len(completions) != 1 or not events or events[-1] is not completions[0]:
             raise TransitionIntegrityError(
                 "journal must end with exactly one rebalance_completed event"

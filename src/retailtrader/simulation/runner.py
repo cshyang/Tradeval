@@ -330,29 +330,39 @@ class ExperimentRunner:
             schema_version=experiment.schema_version,
         )
 
-        created_as_of = datetime.combine(experiment.start, time(0), tzinfo=UTC)
-        self.initial_events = [
-            event_record(
-                experiment.run_id,
-                "portfolio_created",
-                created_as_of,
-                {"cash": initial_cash, "as_of": created_as_of},
-                created_as_of,
-            )
-        ]
-        # Startup owns the same non-reentrant lock as step so recovery cannot
-        # publish projections from a partial view of the canonical journals.
+        requested_created_as_of = datetime.combine(experiment.start, time(0), tzinfo=UTC)
+        # Startup owns the same non-reentrant lock as step. Canonical journals
+        # are validated before durable initial metadata or public files change.
         with self.transition_store.locked():
+            transitions = self.transition_store.read_all()
+            metadata = self.transition_store.initialize_metadata(
+                run_id=experiment.run_id,
+                schema_version=experiment.schema_version,
+                initial_cash=initial_cash,
+                created_as_of=requested_created_as_of,
+            )
+            created_as_of = datetime.fromisoformat(metadata["created_as_of"])
+            durable_initial_cash = Decimal(metadata["initial_cash"])
+            self.initial_events = [
+                event_record(
+                    metadata["run_id"],
+                    "portfolio_created",
+                    created_as_of,
+                    {"cash": durable_initial_cash, "as_of": created_as_of},
+                    created_as_of,
+                )
+            ]
             if not self.writer.path("manifest.json").exists():
                 self.writer.write_manifest(experiment)
                 self.writer.write_philosophy(philosophy_yaml)
-            transitions = _materialize(
+            _materialize(
                 self.event_log,
                 self.writer,
                 self.transition_store,
                 self.initial_events,
+                transitions=transitions,
             )
-            self.portfolio = self._restore_transitions(transitions, initial_cash)
+            self.portfolio = self._restore_transitions(transitions, durable_initial_cash)
 
     def _restore_transitions(
         self,

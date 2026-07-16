@@ -7,6 +7,8 @@ import multiprocessing
 import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -127,6 +129,36 @@ def test_run_lock_serializes_distinct_processes(tmp_path: Path) -> None:
         if second.pid is not None:
             second.join(timeout=5)
     assert first.exitcode == 0
+
+
+def test_initial_metadata_is_durable_idempotent_and_immutable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fsynced_directories: list[int] = []
+    real_fsync = transition_module.os.fsync
+
+    def recording_fsync(descriptor: int) -> None:
+        if stat.S_ISDIR(transition_module.os.fstat(descriptor).st_mode):
+            fsynced_directories.append(transition_module.os.fstat(descriptor).st_ino)
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(transition_module.os, "fsync", recording_fsync)
+    store = TransitionStore(tmp_path)
+    arguments = {
+        "run_id": "run-test",
+        "schema_version": 1,
+        "initial_cash": Decimal("100.00"),
+        "created_as_of": datetime(2024, 1, 1, tzinfo=UTC),
+    }
+    with store.locked():
+        metadata = store.initialize_metadata(**arguments)
+        before = store.metadata_path.read_bytes()
+        assert store.initialize_metadata(**arguments) == metadata
+        with pytest.raises(TransitionIntegrityError, match="metadata mismatch"):
+            store.initialize_metadata(**(arguments | {"initial_cash": Decimal("99.00")}))
+
+    assert store.metadata_path.read_bytes() == before
+    assert tmp_path.stat().st_ino in fsynced_directories
 
 
 def test_first_commit_fsyncs_run_directory_and_transition_directory(

@@ -395,6 +395,49 @@ def test_distinct_stale_runners_serialize_and_restore_canonical_portfolio(
     assert journals == completions == portfolio_sessions == equity_sessions == expected_sessions
 
 
+@pytest.mark.parametrize(
+    "projection",
+    ["fill_price", "created_order_quantity", "rejection_symbol"],
+)
+def test_cross_projection_mismatch_cannot_replace_public_artifacts(
+    tmp_path: Path, projection: str
+) -> None:
+    if projection == "rejection_symbol":
+        runner = ExperimentRunner(
+            experiment=make_experiment(),
+            run_dir=tmp_path,
+            generate_target=stub_generator,
+            benchmarks=BENCHMARKS,
+            philosophy_yaml=PHILOSOPHY_YAML,
+            initial_cash=Decimal("100000.00"),
+            slippage_bps=1000,
+        )
+    else:
+        runner = make_runner(tmp_path)
+    runner.step(frames()[0])
+    public_paths = [tmp_path / name for name in ARTIFACTS + ["events.jsonl"]]
+    before = {path: path.read_bytes() for path in public_paths}
+    journal_path = tmp_path / f"transitions/{SESSIONS[0].isoformat()}.json"
+    journal = json.loads(journal_path.read_text())
+
+    if projection == "fill_price":
+        journal["fills"][0]["fill_price"] = "999.00"
+    elif projection == "created_order_quantity":
+        created = next(
+            event for event in journal["events"] if event["event_type"] == "order_created"
+        )
+        created["payload"]["quantity"] += 1
+    else:
+        assert journal["rejections"]
+        journal["rejections"][0]["symbol"] = "MISMATCH"
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(TransitionIntegrityError):
+        make_runner(tmp_path)
+
+    assert {path: path.read_bytes() for path in public_paths} == before
+
+
 @pytest.mark.parametrize("corruption", ["missing_field", "cross_run"])
 def test_invalid_journal_cannot_replace_any_public_artifact(
     tmp_path: Path, corruption: str
@@ -414,6 +457,73 @@ def test_invalid_journal_cannot_replace_any_public_artifact(
         make_runner(tmp_path)
 
     assert {path: path.read_bytes() for path in public_paths} == before
+
+
+@pytest.mark.parametrize("corruption", ["malformed", "cross_run"])
+def test_invalid_journal_in_empty_run_writes_no_public_files_or_metadata(
+    tmp_path: Path, corruption: str
+) -> None:
+    source = tmp_path / "source"
+    make_runner(source).step(frames()[0])
+    journal = json.loads((source / f"transitions/{SESSIONS[0].isoformat()}.json").read_text())
+    destination = tmp_path / "destination"
+    transition_dir = destination / "transitions"
+    transition_dir.mkdir(parents=True)
+    if corruption == "malformed":
+        del journal["portfolio"]["positions"]
+        experiment = make_experiment()
+    else:
+        experiment = make_experiment("different-run")
+    (transition_dir / f"{SESSIONS[0].isoformat()}.json").write_text(
+        json.dumps(journal), encoding="utf-8"
+    )
+
+    with pytest.raises(TransitionIntegrityError):
+        ExperimentRunner(
+            experiment=experiment,
+            run_dir=destination,
+            generate_target=stub_generator,
+            benchmarks=BENCHMARKS,
+            philosophy_yaml=PHILOSOPHY_YAML,
+            initial_cash=Decimal("100000.00"),
+        )
+
+    public_paths = [destination / name for name in ARTIFACTS + ["events.jsonl"]]
+    assert not any(path.exists() for path in public_paths)
+    assert not (destination / "initial-state.json").exists()
+
+
+def test_initial_cash_metadata_mismatch_precedes_public_writes(tmp_path: Path) -> None:
+    make_runner(tmp_path).step(frames()[0])
+    public_paths = [tmp_path / name for name in ARTIFACTS + ["events.jsonl"]]
+    before = {path: path.read_bytes() for path in public_paths}
+    metadata_path = tmp_path / "initial-state.json"
+    metadata_before = metadata_path.read_bytes()
+
+    with pytest.raises(TransitionIntegrityError, match="initial-state metadata mismatch"):
+        ExperimentRunner(
+            experiment=make_experiment(),
+            run_dir=tmp_path,
+            generate_target=stub_generator,
+            benchmarks=BENCHMARKS,
+            philosophy_yaml=PHILOSOPHY_YAML,
+            initial_cash=Decimal("99999.00"),
+        )
+
+    assert {path: path.read_bytes() for path in public_paths} == before
+    assert metadata_path.read_bytes() == metadata_before
+    metadata = json.loads(metadata_before)
+    created = EventLog(tmp_path / "events.jsonl", "run-test").read()[0]
+    assert metadata == {
+        "created_as_of": "2024-01-01T00:00:00+00:00",
+        "initial_cash": "100000.00",
+        "run_id": "run-test",
+        "schema_version": 1,
+    }
+    assert created["payload"] == {
+        "cash": metadata["initial_cash"],
+        "as_of": metadata["created_as_of"],
+    }
 
 
 def test_ledger_replay_reconstructs_the_final_portfolio(tmp_path: Path) -> None:
