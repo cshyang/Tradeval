@@ -374,6 +374,7 @@ class TransitionStore:
         events = _list(value, "events")
         allowed = EVENT_TYPES - {"portfolio_created"}
         completions = []
+        execution_times: list[datetime] = []
         event_payloads: dict[str, list[dict[str, Any]]] = {}
         for index, raw in enumerate(events):
             event = _mapping(raw, f"events[{index}]")
@@ -392,7 +393,7 @@ class TransitionStore:
                 raise TransitionIntegrityError(f"events[{index}] run_id mismatch")
             if event["event_type"] not in allowed:
                 raise TransitionIntegrityError(f"events[{index}] has invalid event_type")
-            _datetime(event["as_of"], f"events[{index}].as_of")
+            event_as_of = _datetime(event["as_of"], f"events[{index}].as_of")
             _datetime(event["created_at"], f"events[{index}].created_at")
             payload = _mapping(event["payload"], f"events[{index}].payload")
             event_type = event["event_type"]
@@ -404,14 +405,17 @@ class TransitionStore:
                         raise TransitionIntegrityError(
                             "target_generated payload does not match transition target"
                         )
+                    expected_as_of = transition["target"]["as_of"]
                 elif event_type == "order_created":
                     order = OrderIntent.model_validate(payload)
                     if order.run_id != transition["run_id"]:
                         raise TransitionIntegrityError("order_created payload run_id mismatch")
+                    expected_as_of = payload["as_of"]
                 elif event_type == "order_filled":
                     fill = FillEvent.model_validate(payload)
                     if fill.run_id != transition["run_id"]:
                         raise TransitionIntegrityError("order_filled payload run_id mismatch")
+                    expected_as_of = payload["filled_at"]
                 elif event_type == "portfolio_marked":
                     marked = PortfolioSnapshot.model_validate(
                         {"run_id": transition["run_id"], **payload}
@@ -420,10 +424,20 @@ class TransitionStore:
                         raise TransitionIntegrityError(
                             "portfolio_marked payload does not match transition portfolio"
                         )
+                    expected_as_of = transition["portfolio"]["as_of"]
                 elif event_type == "order_rejected":
                     self._validate_orders([payload], session)
+                    expected_as_of = payload["as_of"]
+                else:
+                    expected_as_of = transition["portfolio"]["as_of"]
             except ValidationError as exc:
                 raise TransitionIntegrityError(f"invalid events[{index}] payload: {exc}") from exc
+            if event["as_of"] != expected_as_of:
+                raise TransitionIntegrityError(
+                    f"events[{index}].as_of does not match {event_type} payload timing"
+                )
+            if event_type in {"order_created", "order_rejected", "order_filled"}:
+                execution_times.append(event_as_of)
             if event_type not in {"target_generated"} and (
                 _datetime(event["as_of"], f"events[{index}].as_of").date().isoformat() != session
             ):
@@ -437,6 +451,17 @@ class TransitionStore:
                 raise TransitionIntegrityError(
                     f"journal must contain exactly one {required_type} event"
                 )
+
+        decision_at = _datetime(transition["target"]["as_of"], "target.as_of")
+        marked_at = _datetime(transition["portfolio"]["as_of"], "portfolio.as_of")
+        if decision_at >= marked_at or any(
+            not decision_at < execution_at < marked_at for execution_at in execution_times
+        ):
+            raise TransitionIntegrityError(
+                "event timestamps must preserve decision, execution, mark ordering"
+            )
+        if len(set(execution_times)) > 1:
+            raise TransitionIntegrityError("execution event timestamps must match")
 
         created_orders = [order for order in transition["orders"] if order["status"] == "created"]
         created_event_rows = [

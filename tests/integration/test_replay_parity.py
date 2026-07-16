@@ -474,6 +474,72 @@ def test_same_runner_serializes_step_and_portfolio_assignment(
 
 
 @pytest.mark.parametrize(
+    "event_type",
+    [
+        "target_generated",
+        "order_created",
+        "order_rejected",
+        "order_filled",
+        "portfolio_marked",
+        "rebalance_completed",
+    ],
+)
+def test_event_envelope_timestamp_mismatch_cannot_replace_public_artifacts(
+    tmp_path: Path, event_type: str
+) -> None:
+    if event_type == "order_rejected":
+        runner = ExperimentRunner(
+            experiment=make_experiment(),
+            run_dir=tmp_path,
+            generate_target=stub_generator,
+            benchmarks=BENCHMARKS,
+            philosophy_yaml=PHILOSOPHY_YAML,
+            initial_cash=Decimal("100000.00"),
+            slippage_bps=1000,
+        )
+    else:
+        runner = make_runner(tmp_path)
+    runner.step(frames()[0])
+    public_paths = [tmp_path / name for name in ARTIFACTS + ["events.jsonl"]]
+    before = {path: path.read_bytes() for path in public_paths}
+    journal_path = tmp_path / f"transitions/{SESSIONS[0].isoformat()}.json"
+    journal = json.loads(journal_path.read_text())
+    event = next(item for item in journal["events"] if item["event_type"] == event_type)
+    event["as_of"] = (datetime.fromisoformat(event["as_of"]) + timedelta(minutes=1)).isoformat()
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(TransitionIntegrityError, match="payload timing"):
+        make_runner(tmp_path)
+
+    assert {path: path.read_bytes() for path in public_paths} == before
+
+
+def test_event_timestamps_must_preserve_decision_execution_mark_order(
+    tmp_path: Path,
+) -> None:
+    make_runner(tmp_path).step(frames()[0])
+    public_paths = [tmp_path / name for name in ARTIFACTS + ["events.jsonl"]]
+    before = {path: path.read_bytes() for path in public_paths}
+    journal_path = tmp_path / f"transitions/{SESSIONS[0].isoformat()}.json"
+    journal = json.loads(journal_path.read_text())
+    execution_at = next(
+        event["as_of"] for event in journal["events"] if event["event_type"] == "order_created"
+    )
+    journal["target"]["as_of"] = execution_at
+    target_event = next(
+        event for event in journal["events"] if event["event_type"] == "target_generated"
+    )
+    target_event["as_of"] = execution_at
+    target_event["payload"]["as_of"] = execution_at
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(TransitionIntegrityError, match="decision, execution, mark"):
+        make_runner(tmp_path)
+
+    assert {path: path.read_bytes() for path in public_paths} == before
+
+
+@pytest.mark.parametrize(
     "projection",
     ["fill_price", "created_order_quantity", "rejection_symbol"],
 )
