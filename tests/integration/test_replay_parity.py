@@ -438,6 +438,43 @@ def test_cross_projection_mismatch_cannot_replace_public_artifacts(
     assert {path: path.read_bytes() for path in public_paths} == before
 
 
+@pytest.mark.parametrize("orphan", ["fill", "created_order"])
+def test_order_fill_bijection_corruption_cannot_replace_public_artifacts(
+    tmp_path: Path, orphan: str
+) -> None:
+    make_runner(tmp_path).step(frames()[0])
+    public_paths = [tmp_path / name for name in ARTIFACTS + ["events.jsonl"]]
+    before = {path: path.read_bytes() for path in public_paths}
+    journal_path = tmp_path / f"transitions/{SESSIONS[0].isoformat()}.json"
+    journal = json.loads(journal_path.read_text())
+
+    if orphan == "fill":
+        created_index = next(
+            index for index, order in enumerate(journal["orders"]) if order["status"] == "created"
+        )
+        journal["orders"].pop(created_index)
+        created_event_index = next(
+            index
+            for index, event in enumerate(journal["events"])
+            if event["event_type"] == "order_created"
+        )
+        journal["events"].pop(created_event_index)
+    else:
+        journal["fills"].pop(0)
+        fill_event_index = next(
+            index
+            for index, event in enumerate(journal["events"])
+            if event["event_type"] == "order_filled"
+        )
+        journal["events"].pop(fill_event_index)
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+
+    with pytest.raises(TransitionIntegrityError, match="do not form a bijection"):
+        make_runner(tmp_path)
+
+    assert {path: path.read_bytes() for path in public_paths} == before
+
+
 @pytest.mark.parametrize("corruption", ["missing_field", "cross_run"])
 def test_invalid_journal_cannot_replace_any_public_artifact(
     tmp_path: Path, corruption: str

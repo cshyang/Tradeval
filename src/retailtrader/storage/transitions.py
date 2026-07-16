@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import tempfile
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -446,6 +447,27 @@ class TransitionStore:
         ]
         if fill_event_rows != transition["fills"]:
             raise TransitionIntegrityError("order_filled events do not match fill rows")
+
+        created_keys = Counter(
+            (
+                order["symbol"],
+                order["side"],
+                order["quantity"],
+                order["as_of"],
+            )
+            for order in created_orders
+        )
+        fill_keys = Counter(
+            (
+                fill["symbol"],
+                fill["side"],
+                fill["quantity"],
+                fill["filled_at"],
+            )
+            for fill in transition["fills"]
+        )
+        if created_keys != fill_keys:
+            raise TransitionIntegrityError("created orders and fills do not form a bijection")
         if len(completions) != 1 or not events or events[-1] is not completions[0]:
             raise TransitionIntegrityError(
                 "journal must end with exactly one rebalance_completed event"
