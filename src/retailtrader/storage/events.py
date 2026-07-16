@@ -12,7 +12,9 @@ only non-deterministic field; parity comparisons must exclude it.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import os
+import tempfile
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -52,8 +54,45 @@ def to_jsonable(value: Any) -> Any:
     return value
 
 
+def event_record(
+    run_id: str,
+    event_type: str,
+    as_of: datetime,
+    payload: Any,
+    created_at: datetime,
+) -> dict[str, Any]:
+    """Build a fully timestamped event envelope without writing it."""
+    if event_type not in EVENT_TYPES:
+        raise ValueError(f"unknown event type: {event_type}")
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": run_id,
+        "event_type": event_type,
+        "as_of": to_jsonable(as_of),
+        "created_at": to_jsonable(created_at),
+        "payload": to_jsonable(payload),
+    }
+
+
+def _replace_complete(path: Path, content: bytes) -> None:
+    """Write a complete sibling temp file and atomically replace ``path``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 class EventLog:
-    """Append-only JSONL event log for one run."""
+    """JSONL event projection for one run (with legacy append support)."""
 
     def __init__(self, path: Path, run_id: str) -> None:
         self.path = path
@@ -66,20 +105,32 @@ class EventLog:
         payload: Any,
         created_at: datetime | None = None,
     ) -> dict[str, Any]:
-        if event_type not in EVENT_TYPES:
-            raise ValueError(f"unknown event type: {event_type}")
-        event = {
-            "schema_version": SCHEMA_VERSION,
-            "run_id": self.run_id,
-            "event_type": event_type,
-            "as_of": to_jsonable(as_of),
-            "created_at": to_jsonable(created_at or datetime.now(UTC)),
-            "payload": to_jsonable(payload),
-        }
+        event = event_record(
+            self.run_id,
+            event_type,
+            as_of,
+            payload,
+            created_at or datetime.now(UTC),
+        )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event) + "\n")
         return event
+
+    def materialize(
+        self,
+        initial_events: Sequence[Mapping[str, Any]],
+        transitions: Sequence[Mapping[str, Any]],
+        failure_hook: Callable[[str], None] | None = None,
+    ) -> None:
+        """Replace events.jsonl with the deterministic journal projection."""
+        events = [*initial_events]
+        for transition in transitions:
+            events.extend(transition["events"])
+        content = "".join(json.dumps(event) + "\n" for event in events).encode()
+        _replace_complete(self.path, content)
+        if failure_hook is not None:
+            failure_hook(f"after_artifact_replace:{self.path.name}")
 
     def read(self) -> list[dict[str, Any]]:
         if not self.path.exists():

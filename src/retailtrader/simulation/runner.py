@@ -1,12 +1,8 @@
 """Unified replay / forward-paper runner.
 
-Both modes call the single module-level `step` transition (Core Invariant 4):
-historical replay loops it over frames; forward paper trading calls it once
-per completed decision/execution pair. Target generation is injected as a callable, so
-the runner never imports scoring or allocation.
-
-Idempotency: a session whose `rebalance_completed` event already exists in the
-event log is skipped without writing anything.
+Both modes call the single module-level `step` transition. Completed transitions
+are owned by immutable per-session journals; public JSONL/CSV files are only
+atomic, deterministic projections of those journals.
 """
 
 from __future__ import annotations
@@ -26,8 +22,9 @@ from retailtrader.domain import (
 )
 from retailtrader.simulation.execution import execute_rebalance
 from retailtrader.simulation.frame import SimulationFrame
-from retailtrader.storage.artifacts import RunWriter, portfolio_row
-from retailtrader.storage.events import EventLog
+from retailtrader.storage.artifacts import RunWriter, fill_row, portfolio_row
+from retailtrader.storage.events import EventLog, event_record, to_jsonable
+from retailtrader.storage.transitions import FailureHook, TransitionStore
 
 TargetGenerator = Callable[
     [ExperimentManifest, MarketSnapshot],
@@ -67,6 +64,19 @@ def portfolio_from_row(run_id: str, row: Mapping[str, Any]) -> PortfolioSnapshot
     )
 
 
+def _materialize(
+    event_log: EventLog,
+    writer: RunWriter,
+    transition_store: TransitionStore,
+    initial_events: Sequence[Mapping[str, Any]],
+    failure_hook: FailureHook | None = None,
+) -> list[dict[str, Any]]:
+    transitions = transition_store.read_all()
+    event_log.materialize(initial_events, transitions, failure_hook)
+    writer.materialize(transitions, failure_hook)
+    return transitions
+
+
 def step(
     experiment: ExperimentManifest,
     portfolio: PortfolioSnapshot,
@@ -75,12 +85,15 @@ def step(
     *,
     event_log: EventLog,
     writer: RunWriter,
+    transition_store: TransitionStore,
+    initial_events: Sequence[Mapping[str, Any]],
     benchmarks: Benchmarks,
     slippage_bps: int = 0,
+    failure_hook: FailureHook | None = None,
 ) -> PortfolioSnapshot:
-    """Single portfolio transition shared by replay and forward paper modes."""
+    """Compute, commit, then materialize one portfolio transition."""
     session_key = frame.execution_session.isoformat()
-    if session_key in event_log.completed_sessions():
+    if session_key in transition_store.completed_sessions():
         return portfolio
 
     session = frame.execution_session
@@ -91,9 +104,6 @@ def step(
     target, decisions = generate_target(experiment, frame.decision)
     if target.as_of != frame.decision.as_of:
         raise ValueError("target.as_of must equal frame.decision.as_of")
-    event_log.append("target_generated", frame.decision.as_of, target.model_dump())
-    for record in decisions:
-        writer.append_decision(record)
 
     result = execute_rebalance(
         portfolio,
@@ -103,39 +113,129 @@ def step(
         slippage_bps=slippage_bps,
     )
 
+    created_at = datetime.now(UTC)
+    events = [
+        event_record(
+            experiment.run_id,
+            "target_generated",
+            frame.decision.as_of,
+            target.model_dump(),
+            created_at,
+        )
+    ]
+    order_rows: list[dict[str, Any]] = []
     for order in result.orders:
-        event_log.append("order_created", frame.execution_at, order.model_dump())
-        writer.append_order(
-            {
-                "as_of": frame.execution_at,
-                "symbol": order.symbol,
-                "side": order.side,
-                "quantity": order.quantity,
-                "status": "created",
-                "reason": None,
-            }
+        events.append(
+            event_record(
+                experiment.run_id,
+                "order_created",
+                frame.execution_at,
+                order.model_dump(),
+                created_at,
+            )
+        )
+        order_rows.append(
+            to_jsonable(
+                {
+                    "as_of": frame.execution_at,
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "quantity": order.quantity,
+                    "status": "created",
+                    "reason": None,
+                }
+            )
         )
     for rejection in result.rejections:
-        payload = {
-            "as_of": frame.execution_at,
-            "symbol": rejection.symbol,
-            "side": rejection.side,
-            "quantity": rejection.requested_quantity,
-            "status": "rejected",
-            "reason": rejection.reason,
-        }
-        event_log.append("order_rejected", frame.execution_at, payload)
-        writer.append_order(payload)
+        payload = to_jsonable(
+            {
+                "as_of": frame.execution_at,
+                "symbol": rejection.symbol,
+                "side": rejection.side,
+                "quantity": rejection.requested_quantity,
+                "status": "rejected",
+                "reason": rejection.reason,
+            }
+        )
+        events.append(
+            event_record(
+                experiment.run_id,
+                "order_rejected",
+                frame.execution_at,
+                payload,
+                created_at,
+            )
+        )
+        order_rows.append(payload)
     for fill in result.fills:
-        event_log.append("order_filled", frame.execution_at, fill.model_dump())
-        writer.append_fill(fill)
+        events.append(
+            event_record(
+                experiment.run_id,
+                "order_filled",
+                frame.execution_at,
+                fill.model_dump(),
+                created_at,
+            )
+        )
 
-    event_log.append("portfolio_marked", frame.execution.as_of, portfolio_row(result.portfolio))
-    writer.append_portfolio(result.portfolio)
-    writer.append_equity_row(
-        session, result.portfolio.total_equity, spy_equity, equal_weight_equity
+    marked_row = portfolio_row(result.portfolio)
+    events.extend(
+        [
+            event_record(
+                experiment.run_id,
+                "portfolio_marked",
+                frame.execution.as_of,
+                marked_row,
+                created_at,
+            ),
+            event_record(
+                experiment.run_id,
+                "rebalance_completed",
+                frame.execution.as_of,
+                {"session": session},
+                created_at,
+            ),
+        ]
     )
-    event_log.append("rebalance_completed", frame.execution.as_of, {"session": session})
+    transition = {
+        "schema_version": experiment.schema_version,
+        "run_id": experiment.run_id,
+        "session": session_key,
+        "target": to_jsonable(target),
+        "decisions": to_jsonable(decisions),
+        "orders": order_rows,
+        "rejections": [
+            {
+                "symbol": rejection.symbol,
+                "side": rejection.side,
+                "requested_quantity": rejection.requested_quantity,
+                "reason": rejection.reason,
+            }
+            for rejection in result.rejections
+        ],
+        "fills": [fill_row(fill) for fill in result.fills],
+        "portfolio": marked_row,
+        "references": {
+            "spy_equity": str(spy_equity),
+            "equal_weight_equity": str(equal_weight_equity),
+        },
+        "equity": {
+            "date": session_key,
+            "equity": str(result.portfolio.total_equity),
+            "spy_equity": str(spy_equity),
+            "equal_weight_equity": str(equal_weight_equity),
+        },
+        "events": events,
+    }
+
+    transition_store.commit(session, transition)
+    _materialize(
+        event_log,
+        writer,
+        transition_store,
+        initial_events,
+        failure_hook,
+    )
     return result.portfolio
 
 
@@ -152,27 +252,39 @@ class ExperimentRunner:
         philosophy_yaml: str,
         initial_cash: Decimal,
         slippage_bps: int = 0,
+        failure_hook: FailureHook | None = None,
     ) -> None:
         self.experiment = experiment
         self.generate_target = generate_target
         self.benchmarks = benchmarks
         self.slippage_bps = slippage_bps
+        self.failure_hook = failure_hook
         self.writer = RunWriter(run_dir)
         self.event_log = EventLog(run_dir / "events.jsonl", experiment.run_id)
+        self.transition_store = TransitionStore(run_dir, failure_hook)
 
-        events = self.event_log.read()
-        if not events:
+        if not self.writer.path("manifest.json").exists():
             self.writer.write_manifest(experiment)
             self.writer.write_philosophy(philosophy_yaml)
-            created_as_of = datetime.combine(experiment.start, time(0), tzinfo=UTC)
-            self.portfolio = initial_portfolio(experiment, initial_cash, created_as_of)
-            self.event_log.append(
+
+        created_as_of = datetime.combine(experiment.start, time(0), tzinfo=UTC)
+        self.initial_events = [
+            event_record(
+                experiment.run_id,
                 "portfolio_created",
                 created_as_of,
                 {"cash": initial_cash, "as_of": created_as_of},
+                created_as_of,
             )
-        else:
-            self.portfolio = self._restore(events, initial_cash)
+        ]
+        # Recovery always rebuilds public projections before ledger restoration.
+        _materialize(
+            self.event_log,
+            self.writer,
+            self.transition_store,
+            self.initial_events,
+        )
+        self.portfolio = self._restore(self.event_log.read(), initial_cash)
 
     def _restore(
         self, events: Sequence[Mapping[str, Any]], initial_cash: Decimal
@@ -192,8 +304,11 @@ class ExperimentRunner:
             self.generate_target,
             event_log=self.event_log,
             writer=self.writer,
+            transition_store=self.transition_store,
+            initial_events=self.initial_events,
             benchmarks=self.benchmarks,
             slippage_bps=self.slippage_bps,
+            failure_hook=self.failure_hook,
         )
         return self.portfolio
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -72,7 +73,9 @@ def frames() -> list:
     ]
 
 
-def make_runner(run_dir: Path) -> ExperimentRunner:
+def make_runner(
+    run_dir: Path, failure_hook: Callable[[str], None] | None = None
+) -> ExperimentRunner:
     return ExperimentRunner(
         experiment=make_experiment(),
         run_dir=run_dir,
@@ -81,6 +84,7 @@ def make_runner(run_dir: Path) -> ExperimentRunner:
         philosophy_yaml=PHILOSOPHY_YAML,
         initial_cash=Decimal("100000.00"),
         slippage_bps=10,
+        failure_hook=failure_hook,
     )
 
 
@@ -105,6 +109,72 @@ def test_replay_and_forward_paper_produce_identical_artifacts(tmp_path: Path) ->
     for name in ARTIFACTS:
         assert (replay_dir / name).read_bytes() == (forward_dir / name).read_bytes(), name
     assert events_without_created_at(replay_dir) == events_without_created_at(forward_dir)
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        "events.jsonl",
+        "decisions.jsonl",
+        "orders.jsonl",
+        "fills.jsonl",
+        "portfolio.jsonl",
+        "equity.csv",
+    ],
+)
+def test_restart_recovers_after_every_derived_artifact_replacement(
+    tmp_path: Path, artifact: str
+) -> None:
+    run_dir = tmp_path / artifact
+
+    def fail(point: str) -> None:
+        if point == f"after_artifact_replace:{artifact}":
+            raise OSError(f"injected after {artifact}")
+
+    with pytest.raises(OSError, match="injected"):
+        make_runner(run_dir, fail).step(frames()[0])
+
+    assert (run_dir / f"transitions/{SESSIONS[0].isoformat()}.json").exists()
+    recovered = make_runner(run_dir)
+    expected = {
+        name: (run_dir / name).read_bytes() for name in ARTIFACTS + ["events.jsonl"]
+    }
+    assert len(read_jsonl(run_dir / "fills.jsonl")) == len(
+        json.loads((run_dir / f"transitions/{SESSIONS[0].isoformat()}.json").read_text())["fills"]
+    )
+    assert len(recovered.event_log.completed_sessions()) == 1
+
+    make_runner(run_dir)
+    actual = {name: (run_dir / name).read_bytes() for name in expected}
+    assert actual == expected
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    [
+        "before_journal_replace",
+        "after_journal_replace",
+        "before_parent_fsync",
+        "after_parent_fsync",
+    ],
+)
+def test_restart_accepts_atomic_journal_outcome_and_materializes_once(
+    tmp_path: Path, failure_point: str
+) -> None:
+    def fail(point: str) -> None:
+        if point == failure_point:
+            raise OSError(f"injected at {point}")
+
+    with pytest.raises(OSError, match="injected"):
+        make_runner(tmp_path, fail).step(frames()[0])
+
+    recovered = make_runner(tmp_path)
+    recovered.step(frames()[0])
+    assert len(list((tmp_path / "transitions").glob("*.json"))) == 1
+    journal = json.loads(next((tmp_path / "transitions").glob("*.json")).read_text())
+    assert read_jsonl(tmp_path / "fills.jsonl") == journal["fills"]
+    assert len(recovered.event_log.completed_sessions()) == 1
+
 
 
 def test_target_generator_receives_only_decision_snapshot(tmp_path: Path) -> None:

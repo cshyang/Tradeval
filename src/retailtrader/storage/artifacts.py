@@ -15,13 +15,14 @@ Money is serialized as decimal strings; timestamps as ISO-8601 UTC.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from retailtrader.domain import ExperimentManifest, FillEvent, PortfolioSnapshot
-from retailtrader.storage.events import to_jsonable
+from retailtrader.storage.events import _replace_complete, to_jsonable
 
 EQUITY_HEADER = "date,equity,spy_equity,equal_weight_equity"
 
@@ -108,3 +109,39 @@ class RunWriter:
             handle.write(
                 f"{session.isoformat()},{equity:.2f},{spy_equity:.2f},{equal_weight_equity:.2f}\n"
             )
+
+    def materialize(
+        self,
+        transitions: Sequence[Mapping[str, Any]],
+        failure_hook: Callable[[str], None] | None = None,
+    ) -> None:
+        """Atomically replace all public artifacts projected from journals."""
+        projections: dict[str, list[Mapping[str, Any]]] = {
+            "decisions.jsonl": [],
+            "orders.jsonl": [],
+            "fills.jsonl": [],
+            "portfolio.jsonl": [],
+        }
+        equity_lines = [EQUITY_HEADER]
+        for transition in transitions:
+            projections["decisions.jsonl"].extend(transition["decisions"])
+            projections["orders.jsonl"].extend(transition["orders"])
+            projections["fills.jsonl"].extend(transition["fills"])
+            projections["portfolio.jsonl"].append(transition["portfolio"])
+            equity = transition["equity"]
+            equity_lines.append(
+                f"{equity['date']},{Decimal(equity['equity']):.2f},"
+                f"{Decimal(equity['spy_equity']):.2f},"
+                f"{Decimal(equity['equal_weight_equity']):.2f}"
+            )
+
+        for name, records in projections.items():
+            content = "".join(json.dumps(record) + "\n" for record in records).encode()
+            _replace_complete(self.path(name), content)
+            if failure_hook is not None:
+                failure_hook(f"after_artifact_replace:{name}")
+
+        equity_content = ("\n".join(equity_lines) + "\n").encode()
+        _replace_complete(self.path("equity.csv"), equity_content)
+        if failure_hook is not None:
+            failure_hook("after_artifact_replace:equity.csv")
