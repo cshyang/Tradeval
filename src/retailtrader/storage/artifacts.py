@@ -15,14 +15,18 @@ Money is serialized as decimal strings; timestamps as ISO-8601 UTC.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from retailtrader.domain import ExperimentManifest, FillEvent, PortfolioSnapshot
 from retailtrader.storage.events import _replace_complete, to_jsonable
+from retailtrader.storage.transitions import TransitionIntegrityError
 
 EQUITY_HEADER = "date,equity,spy_equity,equal_weight_equity"
 
@@ -70,14 +74,57 @@ class RunWriter:
     def path(self, name: str) -> Path:
         return self.run_dir / name
 
+    def _fsync_run_directory(self) -> None:
+        descriptor = os.open(self.run_dir, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _write_durable(self, name: str, content: bytes) -> None:
+        _replace_complete(self.path(name), content)
+        self._fsync_run_directory()
+
     def write_manifest(self, manifest: ExperimentManifest) -> None:
         payload = to_jsonable(manifest.model_dump())
-        self.path("manifest.json").write_text(
-            json.dumps(payload, indent=2) + "\n", encoding="utf-8"
-        )
+        self._write_durable("manifest.json", (json.dumps(payload, indent=2) + "\n").encode())
 
     def write_philosophy(self, yaml_text: str) -> None:
-        self.path("philosophy.yaml").write_text(yaml_text, encoding="utf-8")
+        self._write_durable("philosophy.yaml", yaml_text.encode())
+
+    def ensure_run_metadata(self, manifest: ExperimentManifest, philosophy_yaml: str) -> None:
+        """Validate immutable run identity, then atomically heal missing files."""
+        manifest_path = self.path("manifest.json")
+        philosophy_path = self.path("philosophy.yaml")
+        if manifest_path.exists():
+            try:
+                existing_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+                existing = ExperimentManifest.model_validate(existing_payload)
+            except (
+                OSError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+                ValidationError,
+            ) as exc:
+                raise TransitionIntegrityError("invalid manifest.json") from exc
+            stable_existing = existing.model_dump(exclude={"created_at"})
+            stable_expected = manifest.model_dump(exclude={"created_at"})
+            if stable_existing != stable_expected:
+                raise TransitionIntegrityError("immutable manifest identity mismatch")
+        if philosophy_path.exists():
+            try:
+                existing_philosophy = philosophy_path.read_bytes()
+            except OSError as exc:
+                raise TransitionIntegrityError("invalid philosophy.yaml") from exc
+            if existing_philosophy != philosophy_yaml.encode():
+                raise TransitionIntegrityError("immutable philosophy.yaml mismatch")
+
+        if not manifest_path.exists():
+            self.write_manifest(manifest)
+        if not philosophy_path.exists():
+            self.write_philosophy(philosophy_yaml)
+        # Existing entries may themselves be visible from an interrupted write.
+        self._fsync_run_directory()
 
     def _append_jsonl(self, name: str, record: dict[str, Any]) -> None:
         with self.path(name).open("a", encoding="utf-8") as handle:

@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from retailtrader.domain import (
@@ -77,6 +78,7 @@ def _materialize(
     *,
     transitions: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    transition_store.ensure_durable()
     validated = transition_store.read_all() if transitions is None else list(transitions)
     event_log.materialize(initial_events, validated, failure_hook)
     writer.materialize(validated, failure_hook)
@@ -133,6 +135,7 @@ def _step_locked(
     failure_hook: FailureHook | None,
 ) -> PortfolioSnapshot:
     """Run one transition while the caller owns the run-level lock."""
+    transition_store.ensure_durable()
     transitions = transition_store.read_all()
     session_key = frame.execution_session.isoformat()
     completed = {transition["session"] for transition in transitions}
@@ -321,6 +324,7 @@ class ExperimentRunner:
         self.benchmarks = benchmarks
         self.slippage_bps = slippage_bps
         self.failure_hook = failure_hook
+        self._step_lock = Lock()
         self.writer = RunWriter(run_dir)
         self.event_log = EventLog(run_dir / "events.jsonl", experiment.run_id)
         self.transition_store = TransitionStore(
@@ -334,6 +338,7 @@ class ExperimentRunner:
         # Startup owns the same non-reentrant lock as step. Canonical journals
         # are validated before durable initial metadata or public files change.
         with self.transition_store.locked():
+            self.transition_store.ensure_durable()
             transitions = self.transition_store.read_all()
             metadata = self.transition_store.initialize_metadata(
                 run_id=experiment.run_id,
@@ -352,9 +357,7 @@ class ExperimentRunner:
                     created_as_of,
                 )
             ]
-            if not self.writer.path("manifest.json").exists():
-                self.writer.write_manifest(experiment)
-                self.writer.write_philosophy(philosophy_yaml)
+            self.writer.ensure_run_metadata(experiment, philosophy_yaml)
             _materialize(
                 self.event_log,
                 self.writer,
@@ -376,20 +379,21 @@ class ExperimentRunner:
 
     def step(self, frame: SimulationFrame) -> PortfolioSnapshot:
         """Forward paper mode: process one completed decision/execution frame."""
-        self.portfolio = step(
-            self.experiment,
-            self.portfolio,
-            frame,
-            self.generate_target,
-            event_log=self.event_log,
-            writer=self.writer,
-            transition_store=self.transition_store,
-            initial_events=self.initial_events,
-            benchmarks=self.benchmarks,
-            slippage_bps=self.slippage_bps,
-            failure_hook=self.failure_hook,
-        )
-        return self.portfolio
+        with self._step_lock:
+            self.portfolio = step(
+                self.experiment,
+                self.portfolio,
+                frame,
+                self.generate_target,
+                event_log=self.event_log,
+                writer=self.writer,
+                transition_store=self.transition_store,
+                initial_events=self.initial_events,
+                benchmarks=self.benchmarks,
+                slippage_bps=self.slippage_bps,
+                failure_hook=self.failure_hook,
+            )
+            return self.portfolio
 
     def replay(self, frames: Sequence[SimulationFrame]) -> PortfolioSnapshot:
         """Historical replay mode: loop the same transition over all frames."""

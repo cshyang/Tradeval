@@ -164,6 +164,11 @@ class TransitionStore:
             os.close(descriptor)
         self._fail("after_parent_fsync")
 
+    def ensure_durable(self) -> None:
+        """Fsync visible journal entries before they become recovery inputs."""
+        if self.directory.exists():
+            self._fsync_directory()
+
     def initialize_metadata(
         self,
         *,

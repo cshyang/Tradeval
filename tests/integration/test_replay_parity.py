@@ -14,6 +14,9 @@ from pathlib import Path
 
 import pytest
 
+import retailtrader.simulation.runner as runner_module
+import retailtrader.storage.events as event_module
+import retailtrader.storage.transitions as transition_module
 from retailtrader.evaluation.metrics import compute_evaluation, read_equity_csv
 from retailtrader.evaluation.report import write_evaluation_json
 from retailtrader.simulation.ledger import replay_events
@@ -175,6 +178,42 @@ def test_restart_accepts_atomic_journal_outcome_and_materializes_once(
     journal = json.loads(next((tmp_path / "transitions").glob("*.json")).read_text())
     assert read_jsonl(tmp_path / "fills.jsonl") == journal["fills"]
     assert len(recovered.event_log.completed_sessions()) == 1
+
+
+def test_recovery_fsyncs_visible_journal_before_artifact_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_before_directory_fsync(point: str) -> None:
+        if point == "before_parent_fsync":
+            raise OSError("injected before transition directory fsync")
+
+    with pytest.raises(OSError, match="injected"):
+        make_runner(tmp_path, fail_before_directory_fsync).step(frames()[0])
+
+    actions: list[str] = []
+    transition_inode = (tmp_path / "transitions").stat().st_ino
+    real_fsync = transition_module.os.fsync
+    real_replace = event_module.os.replace
+
+    def recording_fsync(descriptor: int) -> None:
+        if transition_module.os.fstat(descriptor).st_ino == transition_inode:
+            actions.append("transition-directory-fsync")
+        real_fsync(descriptor)
+
+    def recording_replace(source: Path, target: Path) -> None:
+        actions.append(f"artifact-replace:{Path(target).name}")
+        real_replace(source, target)
+
+    monkeypatch.setattr(transition_module.os, "fsync", recording_fsync)
+    monkeypatch.setattr(event_module.os, "replace", recording_replace)
+
+    make_runner(tmp_path)
+
+    first_fsync = actions.index("transition-directory-fsync")
+    first_replace = next(
+        index for index, action in enumerate(actions) if action.startswith("artifact-replace:")
+    )
+    assert first_fsync < first_replace
 
 
 def test_target_generator_receives_only_decision_snapshot(tmp_path: Path) -> None:
@@ -395,6 +434,45 @@ def test_distinct_stale_runners_serialize_and_restore_canonical_portfolio(
     assert journals == completions == portfolio_sessions == equity_sessions == expected_sessions
 
 
+def test_same_runner_serializes_step_and_portfolio_assignment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = make_runner(tmp_path)
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_attempting = threading.Event()
+    calls: list[date] = []
+
+    def controlled_step(experiment, portfolio, frame, generate_target, **kwargs):
+        calls.append(frame.execution_session)
+        if len(calls) == 1:
+            first_entered.set()
+            if not release_first.wait(timeout=5):
+                raise TimeoutError("first same-runner step was not released")
+        return portfolio.model_copy(update={"as_of": frame.execution.as_of})
+
+    def run_second():
+        second_attempting.set()
+        return runner.step(frames()[1])
+
+    monkeypatch.setattr(runner_module, "step", controlled_step)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(runner.step, frames()[0])
+        assert first_entered.wait(timeout=5)
+        second = executor.submit(run_second)
+        assert second_attempting.wait(timeout=5)
+        try:
+            assert calls == [SESSIONS[0]]
+        finally:
+            release_first.set()
+        first.result(timeout=5)
+        second_result = second.result(timeout=5)
+
+    assert calls == SESSIONS[:2]
+    assert runner.portfolio == second_result
+    assert runner.portfolio.as_of == frames()[1].execution.as_of
+
+
 @pytest.mark.parametrize(
     "projection",
     ["fill_price", "created_order_quantity", "rejection_symbol"],
@@ -528,6 +606,80 @@ def test_invalid_journal_in_empty_run_writes_no_public_files_or_metadata(
     public_paths = [destination / name for name in ARTIFACTS + ["events.jsonl"]]
     assert not any(path.exists() for path in public_paths)
     assert not (destination / "initial-state.json").exists()
+
+
+@pytest.mark.parametrize("missing", ["manifest.json", "philosophy.yaml"])
+def test_missing_run_metadata_file_is_atomically_healed(
+    tmp_path: Path, missing: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_runner(tmp_path).step(frames()[0])
+    manifest_before = (tmp_path / "manifest.json").read_bytes()
+    (tmp_path / missing).unlink()
+    actions: list[str] = []
+    run_inode = tmp_path.stat().st_ino
+    real_fsync = event_module.os.fsync
+    real_replace = event_module.os.replace
+
+    def recording_fsync(descriptor: int) -> None:
+        if event_module.os.fstat(descriptor).st_ino == run_inode:
+            actions.append("run-directory-fsync")
+        real_fsync(descriptor)
+
+    def recording_replace(source: Path, target: Path) -> None:
+        actions.append(f"replace:{Path(target).name}")
+        real_replace(source, target)
+
+    monkeypatch.setattr(event_module.os, "fsync", recording_fsync)
+    monkeypatch.setattr(event_module.os, "replace", recording_replace)
+    make_runner(tmp_path)
+
+    replacement = actions.index(f"replace:{missing}")
+    parent_fsync = actions.index("run-directory-fsync", replacement)
+    assert replacement < parent_fsync
+    assert (tmp_path / "manifest.json").read_bytes() == manifest_before
+    assert (tmp_path / "philosophy.yaml").read_bytes() == PHILOSOPHY_YAML.encode()
+
+
+@pytest.mark.parametrize("corruption", ["manifest_json", "manifest_identity", "philosophy"])
+def test_run_metadata_mismatch_precedes_derived_artifact_changes(
+    tmp_path: Path, corruption: str
+) -> None:
+    make_runner(tmp_path).step(frames()[0])
+    derived_names = [
+        "events.jsonl",
+        "decisions.jsonl",
+        "orders.jsonl",
+        "fills.jsonl",
+        "portfolio.jsonl",
+        "equity.csv",
+    ]
+    before = {name: (tmp_path / name).read_bytes() for name in derived_names}
+    if corruption == "manifest_json":
+        (tmp_path / "manifest.json").write_text("{", encoding="utf-8")
+    elif corruption == "manifest_identity":
+        manifest = json.loads((tmp_path / "manifest.json").read_text())
+        manifest["run_id"] = "different-run"
+        (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    else:
+        (tmp_path / "philosophy.yaml").write_text("different: true\n", encoding="utf-8")
+
+    with pytest.raises(TransitionIntegrityError):
+        make_runner(tmp_path)
+
+    assert {name: (tmp_path / name).read_bytes() for name in derived_names} == before
+
+
+def test_manifest_created_at_is_not_part_of_stable_identity(tmp_path: Path) -> None:
+    make_runner(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["created_at"] = "2024-01-02T00:00:00+00:00"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    changed = manifest_path.read_bytes()
+
+    make_runner(tmp_path)
+
+    assert manifest_path.read_bytes() == changed
 
 
 def test_initial_cash_metadata_mismatch_precedes_public_writes(tmp_path: Path) -> None:
