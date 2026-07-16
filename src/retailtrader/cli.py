@@ -103,16 +103,20 @@ def _simulation_frames(
 def _benchmarks(
     snapshots: list[MarketSnapshot], symbols: tuple[str, ...]
 ) -> dict[date, tuple[Decimal, Decimal]]:
-    """Equal-weight index benchmarks from snapshot closes, based at INITIAL_CASH.
+    """Equal-weight references funded at the first execution open and marked close.
 
     ponytail: synthetic data has no real SPY — the "spy" column is an
     equal-weight mega-cap proxy, documented in the demo report disclaimer.
     """
-    first = {bar.symbol: bar.close for bar in snapshots[0].bars}
+    first_opens = {bar.symbol: bar.open for bar in snapshots[0].bars}
 
     def index_value(snapshot: MarketSnapshot, members: tuple[str, ...]) -> Decimal:
         closes = {bar.symbol: bar.close for bar in snapshot.bars}
-        ratios = [closes[s] / first[s] for s in members if s in closes and s in first]
+        ratios = [
+            closes[s] / first_opens[s]
+            for s in members
+            if s in closes and s in first_opens
+        ]
         level = float(INITIAL_CASH) * float(sum(ratios) / len(ratios))
         return Decimal(f"{level:.2f}")
 
