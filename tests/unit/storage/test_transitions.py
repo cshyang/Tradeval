@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
+import retailtrader.storage.transitions as transition_module
 from retailtrader.storage.transitions import TransitionIntegrityError, TransitionStore
 
 
@@ -46,6 +50,65 @@ def test_conflicting_content_for_session_raises_integrity_error(tmp_path: Path) 
     conflicting = TRANSITION | {"fills": [{"symbol": "AAA"}]}
     with pytest.raises(TransitionIntegrityError, match=SESSION):
         store.commit(SESSION, conflicting)
+
+
+def _commit_concurrently_at_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transitions: list[dict[str, object]],
+) -> list[BaseException | None]:
+    publication_barrier = threading.Barrier(len(transitions))
+    real_link = transition_module.os.link
+
+    def synchronized_link(source: Path, target: Path) -> None:
+        publication_barrier.wait(timeout=5)
+        real_link(source, target)
+
+    monkeypatch.setattr(transition_module.os, "link", synchronized_link)
+    with ThreadPoolExecutor(max_workers=len(transitions)) as executor:
+        futures = [
+            executor.submit(TransitionStore(tmp_path).commit, SESSION, transition)
+            for transition in transitions
+        ]
+    return [future.exception() for future in futures]
+
+
+def test_concurrent_conflicting_writers_cannot_overwrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conflicting = TRANSITION | {"fills": [{"symbol": "AAA"}]}
+
+    errors = _commit_concurrently_at_publication(
+        tmp_path, monkeypatch, [TRANSITION, conflicting]
+    )
+
+    assert sum(error is None for error in errors) == 1
+    integrity_errors = [error for error in errors if error is not None]
+    assert len(integrity_errors) == 1
+    assert isinstance(integrity_errors[0], TransitionIntegrityError)
+    store = TransitionStore(tmp_path)
+    final = store.read_all()[0]
+    assert final in (TRANSITION, conflicting)
+    assert store.path(SESSION).read_bytes() == (
+        json.dumps(final, indent=2, sort_keys=True) + "\n"
+    ).encode()
+    assert list(store.directory.glob(f".{SESSION}.*")) == []
+
+
+def test_concurrent_exact_duplicate_writers_are_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    errors = _commit_concurrently_at_publication(
+        tmp_path, monkeypatch, [TRANSITION, TRANSITION.copy()]
+    )
+
+    assert errors == [None, None]
+    store = TransitionStore(tmp_path)
+    assert store.read_all() == [TRANSITION]
+    assert store.path(SESSION).read_bytes() == (
+        json.dumps(TRANSITION, indent=2, sort_keys=True) + "\n"
+    ).encode()
+    assert list(store.directory.glob(f".{SESSION}.*")) == []
 
 
 @pytest.mark.parametrize(

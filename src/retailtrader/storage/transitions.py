@@ -72,17 +72,18 @@ class TransitionStore:
                 os.fsync(handle.fileno())
 
             self._fail("before_journal_replace")
-            # Recheck immediately before replacement so ordinary retries cannot
-            # overwrite an immutable journal.
-            if target.exists():
+            try:
+                # Both paths are in the journal directory, so creating the hard
+                # link atomically publishes the complete, fsynced file without
+                # ever overwriting another writer's journal.
+                os.link(temporary, target)
+            except FileExistsError:
                 if target.read_bytes() == content:
-                    temporary.unlink()
-                    temporary = None
                     return
                 raise TransitionIntegrityError(
                     f"conflicting transition journal for session {session_key}"
-                )
-            os.replace(temporary, target)
+                ) from None
+            temporary.unlink()
             temporary = None
             self._fail("after_journal_replace")
             self._fail("before_parent_fsync")
