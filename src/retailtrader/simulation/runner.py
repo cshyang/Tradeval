@@ -1,8 +1,8 @@
 """Unified replay / forward-paper runner.
 
 Both modes call the single module-level `step` transition (Core Invariant 4):
-historical replay loops it over snapshots; forward paper trading calls it once
-per newly completed session. Target generation is injected as a callable, so
+historical replay loops it over frames; forward paper trading calls it once
+per completed decision/execution pair. Target generation is injected as a callable, so
 the runner never imports scoring or allocation.
 
 Idempotency: a session whose `rebalance_completed` event already exists in the
@@ -25,6 +25,7 @@ from retailtrader.domain import (
     TargetPortfolio,
 )
 from retailtrader.simulation.execution import execute_rebalance
+from retailtrader.simulation.frame import SimulationFrame
 from retailtrader.storage.artifacts import RunWriter, portfolio_row
 from retailtrader.storage.events import EventLog
 
@@ -69,7 +70,7 @@ def portfolio_from_row(run_id: str, row: Mapping[str, Any]) -> PortfolioSnapshot
 def step(
     experiment: ExperimentManifest,
     portfolio: PortfolioSnapshot,
-    snapshot: MarketSnapshot,
+    frame: SimulationFrame,
     generate_target: TargetGenerator,
     *,
     event_log: EventLog,
@@ -78,27 +79,35 @@ def step(
     slippage_bps: int = 0,
 ) -> PortfolioSnapshot:
     """Single portfolio transition shared by replay and forward paper modes."""
-    session_key = snapshot.as_of.astimezone(UTC).isoformat()
+    session_key = frame.execution.as_of.astimezone(UTC).isoformat()
     if session_key in event_log.completed_sessions():
         return portfolio
 
-    session = snapshot.as_of.date()
+    session = frame.execution_session
     if session not in benchmarks:
         raise ValueError(f"missing benchmark equity for session {session}")
     spy_equity, equal_weight_equity = benchmarks[session]
 
-    target, decisions = generate_target(experiment, snapshot)
-    event_log.append("target_generated", snapshot.as_of, target.model_dump())
+    target, decisions = generate_target(experiment, frame.decision)
+    if target.as_of != frame.decision.as_of:
+        raise ValueError("target.as_of must equal frame.decision.as_of")
+    event_log.append("target_generated", frame.decision.as_of, target.model_dump())
     for record in decisions:
         writer.append_decision(record)
 
-    result = execute_rebalance(portfolio, target, snapshot, slippage_bps=slippage_bps)
+    result = execute_rebalance(
+        portfolio,
+        target,
+        frame.execution,
+        filled_at=frame.execution_at,
+        slippage_bps=slippage_bps,
+    )
 
     for order in result.orders:
-        event_log.append("order_created", snapshot.as_of, order.model_dump())
+        event_log.append("order_created", frame.execution_at, order.model_dump())
         writer.append_order(
             {
-                "as_of": snapshot.as_of,
+                "as_of": frame.execution_at,
                 "symbol": order.symbol,
                 "side": order.side,
                 "quantity": order.quantity,
@@ -108,25 +117,25 @@ def step(
         )
     for rejection in result.rejections:
         payload = {
-            "as_of": snapshot.as_of,
+            "as_of": frame.execution_at,
             "symbol": rejection.symbol,
             "side": rejection.side,
             "quantity": rejection.requested_quantity,
             "status": "rejected",
             "reason": rejection.reason,
         }
-        event_log.append("order_rejected", snapshot.as_of, payload)
+        event_log.append("order_rejected", frame.execution_at, payload)
         writer.append_order(payload)
     for fill in result.fills:
-        event_log.append("order_filled", snapshot.as_of, fill.model_dump())
+        event_log.append("order_filled", frame.execution_at, fill.model_dump())
         writer.append_fill(fill)
 
-    event_log.append("portfolio_marked", snapshot.as_of, portfolio_row(result.portfolio))
+    event_log.append("portfolio_marked", frame.execution.as_of, portfolio_row(result.portfolio))
     writer.append_portfolio(result.portfolio)
     writer.append_equity_row(
         session, result.portfolio.total_equity, spy_equity, equal_weight_equity
     )
-    event_log.append("rebalance_completed", snapshot.as_of, {"session": session})
+    event_log.append("rebalance_completed", frame.execution.as_of, {"session": session})
     return result.portfolio
 
 
@@ -174,12 +183,12 @@ class ExperimentRunner:
         created_as_of = datetime.combine(self.experiment.start, time(0), tzinfo=UTC)
         return initial_portfolio(self.experiment, initial_cash, created_as_of)
 
-    def step(self, snapshot: MarketSnapshot) -> PortfolioSnapshot:
-        """Forward paper mode: process one newly completed session."""
+    def step(self, frame: SimulationFrame) -> PortfolioSnapshot:
+        """Forward paper mode: process one completed decision/execution frame."""
         self.portfolio = step(
             self.experiment,
             self.portfolio,
-            snapshot,
+            frame,
             self.generate_target,
             event_log=self.event_log,
             writer=self.writer,
@@ -188,8 +197,8 @@ class ExperimentRunner:
         )
         return self.portfolio
 
-    def replay(self, snapshots: Sequence[MarketSnapshot]) -> PortfolioSnapshot:
-        """Historical replay mode: loop the same transition over all snapshots."""
-        for snapshot in sorted(snapshots, key=lambda item: item.as_of):
-            self.step(snapshot)
+    def replay(self, frames: Sequence[SimulationFrame]) -> PortfolioSnapshot:
+        """Historical replay mode: loop the same transition over all frames."""
+        for frame in sorted(frames, key=lambda item: item.execution.as_of):
+            self.step(frame)
         return self.portfolio

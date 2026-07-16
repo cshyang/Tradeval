@@ -8,17 +8,20 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from retailtrader.evaluation.metrics import compute_evaluation, read_equity_csv
 from retailtrader.evaluation.report import write_evaluation_json
 from retailtrader.simulation.ledger import replay_events
 from retailtrader.simulation.runner import ExperimentRunner
 from retailtrader.storage.artifacts import read_jsonl
 from retailtrader.storage.events import EventLog
-from tests.helpers import make_experiment, make_snapshot, stub_generator
+from tests.helpers import close_dt, make_experiment, make_frame, open_dt, stub_generator
 
 FIXTURE_RUN = Path(__file__).parents[2] / "tests/fixtures/demo-run/exp-trend-v1-2024"
 PHILOSOPHY_YAML = "name: stub\nversion: v1\n"
 
+DECISION_SESSIONS = [date(2024, 1, 5), date(2024, 1, 12), date(2024, 1, 19)]
 SESSIONS = [date(2024, 1, 8), date(2024, 1, 15), date(2024, 1, 22)]
 PRICES = {
     SESSIONS[0]: {
@@ -56,8 +59,16 @@ ARTIFACTS = [
 ]
 
 
-def snapshots() -> list:
-    return [make_snapshot(session, PRICES[session]) for session in SESSIONS]
+def frames() -> list:
+    return [
+        make_frame(
+            decision_session,
+            execution_session,
+            PRICES[execution_session],
+            PRICES[execution_session],
+        )
+        for decision_session, execution_session in zip(DECISION_SESSIONS, SESSIONS, strict=True)
+    ]
 
 
 def make_runner(run_dir: Path) -> ExperimentRunner:
@@ -84,22 +95,86 @@ def test_replay_and_forward_paper_produce_identical_artifacts(tmp_path: Path) ->
     replay_dir = tmp_path / "replay"
     forward_dir = tmp_path / "forward"
 
-    make_runner(replay_dir).replay(snapshots())
+    make_runner(replay_dir).replay(frames())
     # Forward mode: a fresh runner per session, restoring state from the event
     # log, exactly as a daily paper-trading process restart would.
-    for snapshot in snapshots():
-        make_runner(forward_dir).step(snapshot)
+    for frame in frames():
+        make_runner(forward_dir).step(frame)
 
     for name in ARTIFACTS:
         assert (replay_dir / name).read_bytes() == (forward_dir / name).read_bytes(), name
     assert events_without_created_at(replay_dir) == events_without_created_at(forward_dir)
 
 
+def test_decision_execution_timestamps_and_open_price_sizing(tmp_path: Path) -> None:
+    base_frame = frames()[0]
+    changed_prices = {
+        symbol: (str(Decimal(open_price) * 2), close_price)
+        for symbol, (open_price, close_price) in PRICES[SESSIONS[0]].items()
+    }
+    changed_frame = make_frame(
+        DECISION_SESSIONS[0],
+        SESSIONS[0],
+        PRICES[SESSIONS[0]],
+        changed_prices,
+    )
+
+    make_runner(tmp_path / "base").step(base_frame)
+    make_runner(tmp_path / "changed").step(changed_frame)
+
+    base_events = EventLog(tmp_path / "base/events.jsonl", "run-test").read()
+    changed_events = EventLog(tmp_path / "changed/events.jsonl", "run-test").read()
+    base_quantities = [
+        event["payload"]["quantity"]
+        for event in base_events
+        if event["event_type"] == "order_created"
+    ]
+    changed_quantities = [
+        event["payload"]["quantity"]
+        for event in changed_events
+        if event["event_type"] == "order_created"
+    ]
+    assert base_quantities != changed_quantities
+
+    assert [
+        event["as_of"] for event in base_events if event["event_type"] == "target_generated"
+    ] == [close_dt(DECISION_SESSIONS[0]).isoformat()]
+    quantity_events = [
+        event
+        for event in base_events
+        if event["event_type"] in {"order_created", "order_rejected", "order_filled"}
+    ]
+    assert quantity_events
+    assert {event["as_of"] for event in quantity_events} == {open_dt(SESSIONS[0]).isoformat()}
+    assert {
+        event["as_of"]
+        for event in base_events
+        if event["event_type"] in {"portfolio_marked", "rebalance_completed"}
+    } == {close_dt(SESSIONS[0]).isoformat()}
+
+
+def test_target_timestamp_must_match_decision_close(tmp_path: Path) -> None:
+    def mismatched_generator(experiment, snapshot):
+        target, decisions = stub_generator(experiment, snapshot)
+        return target.model_copy(update={"as_of": open_dt(SESSIONS[0])}), decisions
+
+    runner = ExperimentRunner(
+        experiment=make_experiment(),
+        run_dir=tmp_path,
+        generate_target=mismatched_generator,
+        benchmarks=BENCHMARKS,
+        philosophy_yaml=PHILOSOPHY_YAML,
+        initial_cash=Decimal("100000.00"),
+    )
+    with pytest.raises(ValueError, match="target.as_of"):
+        runner.step(frames()[0])
+
+
 def test_repeated_session_processing_is_idempotent(tmp_path: Path) -> None:
     runner = make_runner(tmp_path)
-    runner.replay(snapshots())
+    runner.replay(frames())
     before = {name: (tmp_path / name).read_bytes() for name in ARTIFACTS + ["events.jsonl"]}
-    portfolio = runner.step(snapshots()[-1])  # same session again
+    portfolio = runner.step(frames()[-1])  # same session again
     after = {name: (tmp_path / name).read_bytes() for name in ARTIFACTS + ["events.jsonl"]}
     assert before == after
     assert portfolio == runner.portfolio
@@ -107,7 +182,7 @@ def test_repeated_session_processing_is_idempotent(tmp_path: Path) -> None:
 
 def test_ledger_replay_reconstructs_the_final_portfolio(tmp_path: Path) -> None:
     runner = make_runner(tmp_path)
-    final = runner.replay(snapshots())
+    final = runner.replay(frames())
     state = replay_events(runner.event_log.read())
     assert state.cash == final.cash
     assert state.positions == {p.symbol: p.quantity for p in final.positions}
@@ -117,7 +192,7 @@ def test_ledger_replay_reconstructs_the_final_portfolio(tmp_path: Path) -> None:
 
 def test_artifact_shapes_match_the_frozen_fixture(tmp_path: Path) -> None:
     runner = make_runner(tmp_path)
-    runner.replay(snapshots())
+    runner.replay(frames())
 
     manifest = json.loads((tmp_path / "manifest.json").read_text())
     fixture_manifest = json.loads((FIXTURE_RUN / "manifest.json").read_text())
@@ -151,7 +226,7 @@ def test_artifact_shapes_match_the_frozen_fixture(tmp_path: Path) -> None:
 
 def test_end_to_end_evaluation_from_replayed_artifacts(tmp_path: Path) -> None:
     runner = make_runner(tmp_path)
-    runner.replay(snapshots())
+    runner.replay(frames())
     orders = read_jsonl(tmp_path / "orders.jsonl")
     report = compute_evaluation(
         run_id="run-test",

@@ -13,12 +13,17 @@ from retailtrader.domain import (
     TargetPortfolio,
     TargetPosition,
 )
+from retailtrader.simulation.frame import SimulationFrame
 
 RUN_ID = "run-test"
 
 
 def close_dt(session: date) -> datetime:
     return datetime.combine(session, time(20), tzinfo=UTC)
+
+
+def open_dt(session: date) -> datetime:
+    return datetime.combine(session, time(14, 30), tzinfo=UTC)
 
 
 def make_experiment(run_id: str = RUN_ID) -> ExperimentManifest:
@@ -51,6 +56,19 @@ def make_snapshot(session: date, prices: dict[str, tuple[str, str]]) -> MarketSn
         for symbol, (open_price, close_price) in sorted(prices.items())
     )
     return MarketSnapshot(as_of=close_dt(session), bars=bars)
+
+
+def make_frame(
+    decision_session: date,
+    execution_session: date,
+    decision_prices: dict[str, tuple[str, str]],
+    execution_prices: dict[str, tuple[str, str]],
+) -> SimulationFrame:
+    return SimulationFrame(
+        decision=make_snapshot(decision_session, decision_prices),
+        execution=make_snapshot(execution_session, execution_prices),
+        execution_at=open_dt(execution_session),
+    )
 
 
 def stub_generator(
