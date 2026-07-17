@@ -18,6 +18,12 @@ from typing import Any, NoReturn
 import typer
 import yaml
 
+from retailtrader.agent.contracts import MandateSpec
+from retailtrader.agent.screening import (
+    prepare_screening_inputs,
+    screen_candidates,
+    write_candidate_set,
+)
 from retailtrader.data import synthetic
 from retailtrader.data.cache import CachedDailyPriceSource, DailyPriceLoader, PriceCache
 from retailtrader.data.openbb import OpenBBYFinancePriceSource
@@ -75,9 +81,11 @@ app = typer.Typer(no_args_is_help=True, help="Deterministic trading philosophy l
 philosophy_app = typer.Typer(help="Validate versioned philosophy specifications.")
 experiment_app = typer.Typer(help="Create, replay, evaluate, and compare experiments.")
 paper_app = typer.Typer(help="Advance a synthetic paper experiment one session.")
+agent_app = typer.Typer(help="Prepare and adjudicate untrusted agent intent.")
 app.add_typer(philosophy_app, name="philosophy")
 app.add_typer(experiment_app, name="experiment")
 app.add_typer(paper_app, name="paper")
+app.add_typer(agent_app, name="agent")
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 UNIVERSE_FILE = ROOT / "config" / "universes" / "us-large-cap-30.yaml"
@@ -1256,6 +1264,56 @@ def market_replay(
         }
 
     _execute("market-replay", output_format, action)
+
+
+@agent_app.command("candidates")
+def agent_candidates(
+    experiment: Path = typer.Option(..., help="Frozen MandateSpec JSON."),
+    decision_at: str = typer.Option(..., help="UTC decision cutoff (RFC 3339)."),
+    out: Path = typer.Option(..., help="CandidateSet output path."),
+    price_cache: Path = typer.Option(
+        Path("data/cache"), help="Immutable adjusted-price cache."
+    ),
+    fundamental_cache: Path = typer.Option(
+        Path("data/cache"), help="Immutable SEC companyfacts cache."
+    ),
+    sec_user_agent: str | None = typer.Option(
+        None,
+        envvar="RETAILTRADER_SEC_USER_AGENT",
+        help="SEC application name and contact email; needed only on cache misses.",
+    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.text, "--format"),
+) -> None:
+    """Screen a mandate universe using point-in-time price and SEC evidence."""
+
+    def action() -> dict[str, Any]:
+        parsed_decision_at = datetime.fromisoformat(decision_at.replace("Z", "+00:00"))
+        if parsed_decision_at.tzinfo is None or parsed_decision_at.utcoffset() is None:
+            raise ValueError("decision_at must be timezone-aware")
+        mandate = MandateSpec.model_validate_json(experiment.read_text(encoding="utf-8"))
+        inputs, market_data_hash = prepare_screening_inputs(
+            mandate,
+            parsed_decision_at,
+            price_cache_root=price_cache,
+            fundamental_cache_root=fundamental_cache,
+            sec_user_agent=sec_user_agent,
+        )
+        candidate_set = screen_candidates(
+            mandate, parsed_decision_at, inputs, market_data_hash
+        )
+        write_candidate_set(candidate_set, out)
+        return {
+            "experiment_id": mandate.experiment_id,
+            "candidate_count": len(candidate_set.candidates),
+            "exclusion_count": len(candidate_set.exclusions),
+            "candidate_set_hash": candidate_set.candidate_set_hash,
+            "out": str(out),
+            "message": (
+                f"screened {len(candidate_set.candidates)} candidates | artifact {out}"
+            ),
+        }
+
+    _execute("agent.candidates", output_format, action)
 
 
 @app.command()

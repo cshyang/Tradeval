@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 
 from typer.testing import CliRunner
 
+import retailtrader.cli as cli_module
+from retailtrader.agent.contracts import CapitalSpec, HorizonSpec, LimitSpec, MandateSpec, UniverseSpec
+from retailtrader.agent.evidence import EvidenceMetric
+from retailtrader.agent.screening import ScreeningInput
 from retailtrader.cli import PHILOSOPHY_DIR, app
 
 runner = CliRunner()
@@ -123,3 +129,83 @@ def test_compare_requires_two_runs(tmp_path: Path) -> None:
 
     assert result.exit_code == 3
     assert json.loads(result.stdout)["error"]["code"] == "comparison_requires_two_runs"
+
+
+def test_agent_candidates_writes_stable_json_artifact(
+    tmp_path: Path, monkeypatch
+) -> None:
+    cutoff = datetime(2025, 1, 31, 21, tzinfo=UTC)
+    mandate = MandateSpec(
+        schema_version=1,
+        experiment_id="exp-cli-screen",
+        capital=CapitalSpec(currency="USD", initial_cash="100000.00"),
+        market="US",
+        universe=UniverseSpec(
+            symbols=("AAPL",),
+            screener="price_quality_v1",
+            max_candidates=1,
+            minimum_history_sessions=1,
+            minimum_average_dollar_volume="1",
+            minimum_evidence_coverage=0,
+            pinned_symbols=(),
+            excluded_symbols=(),
+        ),
+        cadence="monthly",
+        horizon=HorizonSpec(kind="hindsight", start=date(2024, 1, 1), end=date(2025, 1, 31)),
+        limits=LimitSpec(
+            minimum_cash_weight=0.05,
+            maximum_position_weight=0.12,
+            maximum_turnover=0.2,
+            maximum_drawdown=0.25,
+        ),
+    )
+    mandate_path = tmp_path / "mandate.json"
+    mandate_path.write_text(mandate.model_dump_json(indent=2), encoding="utf-8")
+    metric = EvidenceMetric(
+        name="earnings_consistency",
+        value=Decimal("1"),
+        source_observation_ids=("obs:earnings",),
+        formula_version="earnings_v1",
+        decision_cutoff=cutoff,
+        unavailable_reason=None,
+    )
+    prepared = (
+        ScreeningInput(
+            symbol="AAPL",
+            supported_security=True,
+            price_history_sessions=300,
+            average_dollar_volume=Decimal("50000000"),
+            latest_price=Decimal("190"),
+            metrics=(metric,),
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "prepare_screening_inputs",
+        lambda *args, **kwargs: (prepared, "sha256:" + "a" * 64),
+    )
+    out = tmp_path / "candidate-set.json"
+    command = (
+        "agent",
+        "candidates",
+        "--experiment",
+        str(mandate_path),
+        "--decision-at",
+        "2025-01-31T21:00:00Z",
+        "--out",
+        str(out),
+        "--format",
+        "json",
+    )
+
+    first = invoke(*command)
+    assert first.exit_code == 0, first.stdout
+    first_bytes = out.read_bytes()
+    second = invoke(*command)
+
+    assert first.exit_code == second.exit_code == 0
+    assert out.read_bytes() == first_bytes
+    payload = json.loads(first.stdout)
+    assert payload["command"] == "agent.candidates"
+    assert payload["result"]["candidate_count"] == 1
+    assert json.loads(first_bytes)["candidates"][0]["symbol"] == "AAPL"

@@ -113,6 +113,11 @@ class UniverseSpec(FrozenModel):
         overlap = set(self.pinned_symbols) & set(self.excluded_symbols)
         if overlap:
             raise ValueError(f"symbols cannot be both pinned and excluded: {sorted(overlap)[0]}")
+        outside = (set(self.pinned_symbols) | set(self.excluded_symbols)) - set(self.symbols)
+        if outside:
+            raise ValueError(f"override symbol is outside universe: {sorted(outside)[0]}")
+        if len(self.pinned_symbols) > self.max_candidates:
+            raise ValueError("max_candidates must accommodate every pinned symbol")
         return self
 
 
@@ -162,6 +167,8 @@ class EvidenceMetric(FrozenModel):
     value: float | None
     unavailable_reason: Annotated[str, Field(min_length=1)] | None
     evidence_refs: tuple[Annotated[str, Field(min_length=1)], ...]
+    formula_version: Annotated[str, Field(min_length=1)]
+    decision_cutoff: UtcSecond
 
     @model_validator(mode="after")
     def _value_or_reason(self) -> Self:
@@ -174,17 +181,23 @@ class Candidate(FrozenModel):
     symbol: Symbol
     score: float
     evidence_coverage: UnitFloat
+    price_history_sessions: NonNegativeInt
+    average_dollar_volume: Annotated[str, Field(pattern=r"^[0-9]+(?:\.[0-9]+)?$")]
+    latest_price: Annotated[str, Field(pattern=r"^[0-9]+(?:\.[0-9]+)?$")]
     metrics: tuple[EvidenceMetric, ...]
 
 
 class CandidateExclusion(FrozenModel):
     symbol: Symbol
     reason: Annotated[str, Field(min_length=1)]
+    evidence_coverage: UnitFloat
+    evidence_refs: tuple[Annotated[str, Field(min_length=1)], ...]
 
 
 class CandidateSet(FrozenModel):
     schema_version: Literal[1]
     experiment_id: Annotated[str, Field(min_length=1)]
+    screener: Literal["price_quality_v1"]
     decision_at: UtcSecond
     market_data_hash: HashString
     candidates: tuple[Candidate, ...]
