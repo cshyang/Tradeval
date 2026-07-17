@@ -1,0 +1,24 @@
+{
+  "name": "agenttrader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "serve": "node dist/index.js"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.0.10",
+    "@mariozechner/pi-agent-core": "0.73.1",
+    "@mariozechner/pi-ai": "0.73.1",
+    "@sinclair/typebox": "0.34.52",
+    "hono": "4.12.30"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5",
+    "vitest": "4.1.10"
+  }
+}
