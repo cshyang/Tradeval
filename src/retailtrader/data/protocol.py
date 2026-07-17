@@ -45,16 +45,36 @@ class PriceQuery:
     adjustment: Literal["splits_and_dividends"] = "splits_and_dividends"
 
     def __post_init__(self) -> None:
+        if isinstance(self.symbols, str) or not isinstance(self.symbols, Sequence):
+            raise TypeError("query symbols must be a non-string sequence of strings")
+        if any(not isinstance(symbol, str) for symbol in self.symbols):
+            raise TypeError("query symbols must contain only strings")
+        if not isinstance(self.start, date) or isinstance(self.start, datetime):
+            raise TypeError("query start must be a date, not a datetime or string")
+        if not isinstance(self.end, date) or isinstance(self.end, datetime):
+            raise TypeError("query end must be a date, not a datetime or string")
+        if not isinstance(self.interval, str):
+            raise TypeError("query interval must be a string")
+        if self.interval != "1d":
+            raise ValueError(f"unsupported query interval {self.interval!r}; only '1d' is supported")
+        if not isinstance(self.adjustment, str):
+            raise TypeError("query adjustment must be a string")
+        if self.adjustment != "splits_and_dividends":
+            raise ValueError(
+                "unsupported query adjustment "
+                f"{self.adjustment!r}; only 'splits_and_dividends' is supported"
+            )
+
         if not self.symbols:
             raise ValueError("query requires at least one symbol")
         normalized_symbols: list[str] = []
         for symbol in self.symbols:
-            if not isinstance(symbol, str) or not symbol.strip():
+            if not symbol.strip():
                 raise ValueError("symbol must be nonempty")
             normalized_symbols.append(symbol.strip().upper())
-        object.__setattr__(self, "symbols", tuple(sorted(set(normalized_symbols))))
         if self.start > self.end:
             raise ValueError("query start must not be after end")
+        object.__setattr__(self, "symbols", tuple(sorted(set(normalized_symbols))))
 
 
 @dataclass(frozen=True)

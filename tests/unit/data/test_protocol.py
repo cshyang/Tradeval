@@ -81,8 +81,14 @@ def _batch(
 
 def test_price_query_normalizes_symbols_and_validates_range() -> None:
     query = PriceQuery((" msft ", "aapl", "MSFT"), date(2024, 1, 1), date(2024, 1, 5))
+    sequence_query = PriceQuery(
+        cast(Any, [" msft ", "aapl", "MSFT"]),
+        date(2024, 1, 1),
+        date(2024, 1, 5),
+    )
 
     assert query.symbols == ("AAPL", "MSFT")
+    assert sequence_query.symbols == query.symbols
     assert query.interval == "1d"
     assert query.adjustment == "splits_and_dividends"
 
@@ -92,6 +98,48 @@ def test_price_query_normalizes_symbols_and_validates_range() -> None:
         PriceQuery((" ",), date(2024, 1, 1), date(2024, 1, 5))
     with pytest.raises(ValueError, match="start must not be after end"):
         PriceQuery(("AAPL",), date(2024, 1, 6), date(2024, 1, 5))
+
+
+def test_price_query_rejects_invalid_symbol_runtime_types() -> None:
+    with pytest.raises(TypeError, match="non-string sequence of strings"):
+        PriceQuery(cast(Any, "AAPL"), date(2024, 1, 1), date(2024, 1, 5))
+    with pytest.raises(TypeError, match="contain only strings"):
+        PriceQuery(cast(Any, ("AAPL", 42)), date(2024, 1, 1), date(2024, 1, 5))
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "invalid_field"),
+    [
+        ("2024-01-01", date(2024, 1, 5), "start"),
+        (datetime(2024, 1, 1), date(2024, 1, 5), "start"),
+        (date(2024, 1, 1), "2024-01-05", "end"),
+        (date(2024, 1, 1), datetime(2024, 1, 5), "end"),
+    ],
+)
+def test_price_query_rejects_string_and_datetime_dates(
+    start: Any,
+    end: Any,
+    invalid_field: str,
+) -> None:
+    with pytest.raises(TypeError, match=rf"query {invalid_field} must be a date"):
+        PriceQuery(("AAPL",), start, end)
+
+
+def test_price_query_rejects_unsupported_interval_and_adjustment() -> None:
+    with pytest.raises(ValueError, match="unsupported query interval '1h'"):
+        PriceQuery(
+            ("AAPL",),
+            date(2024, 1, 1),
+            date(2024, 1, 5),
+            interval=cast(Any, "1h"),
+        )
+    with pytest.raises(ValueError, match="unsupported query adjustment 'unadjusted'"):
+        PriceQuery(
+            ("AAPL",),
+            date(2024, 1, 1),
+            date(2024, 1, 5),
+            adjustment=cast(Any, "unadjusted"),
+        )
 
 
 def test_available_bar_requires_utc_normalizable_ordered_session_availability() -> None:
@@ -203,7 +251,7 @@ def test_canonical_rows_json_and_hash_are_stable() -> None:
     assert normalized_rows_hash((msft, aapl)) == hashlib.sha256(document.encode()).hexdigest()
 
 
-def test_query_key_is_stable_sha256_and_covers_every_identity_dimension() -> None:
+def test_query_key_is_stable_sha256_and_covers_valid_identity_dimensions() -> None:
     base = PriceQuery(("AAPL",), date(2024, 1, 1), date(2024, 1, 5))
     base_key = query_key("openbb", "yfinance", base)
 
@@ -215,16 +263,6 @@ def test_query_key_is_stable_sha256_and_covers_every_identity_dimension() -> Non
         ("openbb", "yfinance", replace(base, symbols=("MSFT",))),
         ("openbb", "yfinance", replace(base, start=date(2024, 1, 2))),
         ("openbb", "yfinance", replace(base, end=date(2024, 1, 6))),
-        (
-            "openbb",
-            "yfinance",
-            replace(base, interval=cast(Any, "1h")),
-        ),
-        (
-            "openbb",
-            "yfinance",
-            replace(base, adjustment=cast(Any, "unadjusted")),
-        ),
     ]
     assert all(query_key(*variant) != base_key for variant in variants)
 
