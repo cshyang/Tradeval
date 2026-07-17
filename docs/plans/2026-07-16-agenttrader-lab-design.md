@@ -193,3 +193,34 @@ The smallest useful first release is:
 4. Define the versioned experiment and proposal artifact schemas for the companion AgentTrader Lab.
 5. Build one cutoff-safe replay and one forward-paper workflow in the companion project.
 6. Keep the UI explicit about synthetic, cutoff-safe, hindsight, and forward-paper provenance.
+
+## RetailTrader Phase Implementation Notes
+
+The RetailTrader-only phase uses completed daily bars from an explicit
+OpenBB/Yahoo route. Each normalized observation carries modeled 09:30 open and
+16:00 close availability in `America/New_York` before it crosses into the
+frozen domain contract. Daylight saving time is handled; exchange early-close
+timestamps are not. Treating 16:00 as availability on an early-close day is
+conservative rather than look-ahead.
+
+Signals are calculated from a completed decision session. Orders and fills are
+simulated at the next actual SPY-calendar session open, and positions are marked
+at that session's close. Immutable transition journals are the source of truth;
+public JSONL/CSV artifacts are recoverable projections. Replay and restarted
+single-step execution use this one transition path.
+
+Yahoo bars use `splits_and_dividends` adjustment for both the strategy and its
+references. Dividends are not added separately. Adjusted OHLC fills are
+normalized research approximations rather than executable quote claims. SPY
+and equal-weight outputs are no-cost, fractional fixed-basket references funded
+at the first execution open.
+
+Because the universe is the present-day fixed large-cap list, the real-price
+workflow is classified as `hindsight_current_universe`, even though bar access
+is time-gated. It must not be described as a cutoff-safe universe replay or a
+forward track record.
+
+This phase does not implement AgentTrader Lab model calls, agent proposals,
+research retrieval, or forward paper operation. Those remain companion-project
+work behind the repository boundary described above. RetailTrader continues to
+make every score, weight, simulated order, fill, cash, and position calculation.
