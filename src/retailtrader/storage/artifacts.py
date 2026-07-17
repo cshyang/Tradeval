@@ -16,13 +16,14 @@ Money is serialized as decimal strings; timestamps as ISO-8601 UTC.
 from __future__ import annotations
 
 import json
-from datetime import date
+import os
+from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from retailtrader.domain import ExperimentManifest, FillEvent, PortfolioSnapshot
-from retailtrader.storage.events import to_jsonable
+from retailtrader.domain import ExperimentManifest, PortfolioSnapshot
+from retailtrader.storage.events import replace_complete, to_jsonable
 
 EQUITY_HEADER = "date,equity,synthetic_mega_cap_proxy_equity,equal_weight_equity"
 SPY_EQUITY_HEADER = "date,equity,spy_equity,equal_weight_equity"
@@ -47,16 +48,6 @@ def portfolio_row(snapshot: PortfolioSnapshot) -> dict[str, Any]:
     }
 
 
-def fill_row(fill: FillEvent) -> dict[str, Any]:
-    return {
-        "symbol": fill.symbol,
-        "side": fill.side,
-        "quantity": fill.quantity,
-        "fill_price": str(fill.fill_price),
-        "filled_at": to_jsonable(fill.filled_at),
-    }
-
-
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     with path.open(encoding="utf-8") as handle:
         return [json.loads(line) for line in handle if line.strip()]
@@ -77,54 +68,84 @@ class RunWriter:
     def path(self, name: str) -> Path:
         return self.run_dir / name
 
+    def _write_durable(self, name: str, content: bytes) -> None:
+        replace_complete(self.path(name), content)
+        descriptor = os.open(self.run_dir, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
     def write_manifest(self, manifest: ExperimentManifest) -> None:
         payload = to_jsonable(manifest.model_dump())
-        self.path("manifest.json").write_text(
-            json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+        self._write_durable(
+            "manifest.json", (json.dumps(payload, indent=2) + "\n").encode()
         )
 
     def write_philosophy(self, yaml_text: str) -> None:
-        self.path("philosophy.yaml").write_text(yaml_text, encoding="utf-8")
+        self._write_durable("philosophy.yaml", yaml_text.encode())
 
     def write_data_provenance(self, provenance: dict[str, Any]) -> None:
-        self.path("data-provenance.json").write_text(
-            json.dumps(to_jsonable(provenance), indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
+        self._write_durable(
+            "data-provenance.json",
+            (json.dumps(to_jsonable(provenance), indent=2, sort_keys=True) + "\n").encode(),
         )
 
-    def initialize_materialized(self, equity_header: str = EQUITY_HEADER) -> None:
+    def materialize(
+        self,
+        transitions: Sequence[Mapping[str, Any]],
+        equity_header: str,
+        failure_hook: Callable[[str], None] | None = None,
+    ) -> None:
+        """Atomically replace every public projection from committed journals."""
         if equity_header not in SUPPORTED_EQUITY_HEADERS:
             raise ValueError(f"unsupported equity header: {equity_header}")
-        for name in ("decisions.jsonl", "orders.jsonl", "fills.jsonl", "portfolio.jsonl"):
-            self.path(name).write_text("", encoding="utf-8")
-        self.path("equity.csv").write_text(equity_header + "\n", encoding="utf-8")
+        reference_column = equity_header.split(",")[2]
+        projections: dict[str, list[dict[str, Any]]] = {
+            "decisions.jsonl": [],
+            "orders.jsonl": [],
+            "fills.jsonl": [],
+            "portfolio.jsonl": [],
+        }
+        equity_lines = [equity_header]
+        for transition in transitions:
+            if transition["reference_column"] != reference_column:
+                raise ValueError("transition reference column does not match equity header")
+            for event in transition["events"]:
+                event_type = event["event_type"]
+                payload = event["payload"]
+                if event_type == "target_generated":
+                    projections["decisions.jsonl"].extend(payload["decisions"])
+                elif event_type == "order_created":
+                    projections["orders.jsonl"].append(
+                        {
+                            "as_of": payload["as_of"],
+                            "symbol": payload["symbol"],
+                            "side": payload["side"],
+                            "quantity": payload["quantity"],
+                            "status": "created",
+                            "reason": None,
+                        }
+                    )
+                elif event_type == "order_rejected":
+                    projections["orders.jsonl"].append(payload)
+                elif event_type == "order_filled":
+                    projections["fills.jsonl"].append(
+                        {key: value for key, value in payload.items() if key != "run_id"}
+                    )
+                elif event_type == "portfolio_marked":
+                    projections["portfolio.jsonl"].append(payload)
+                    equity_lines.append(
+                        f"{transition['session']},{Decimal(payload['total_equity']):.2f},"
+                        f"{Decimal(transition['reference_equity']):.2f},"
+                        f"{Decimal(transition['equal_weight_equity']):.2f}"
+                    )
 
-    def _append_jsonl(self, name: str, record: dict[str, Any]) -> None:
-        with self.path(name).open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(to_jsonable(record)) + "\n")
-
-    def append_decision(self, record: dict[str, Any]) -> None:
-        self._append_jsonl("decisions.jsonl", record)
-
-    def append_order(self, record: dict[str, Any]) -> None:
-        self._append_jsonl("orders.jsonl", record)
-
-    def append_fill(self, fill: FillEvent) -> None:
-        self._append_jsonl("fills.jsonl", fill_row(fill))
-
-    def append_portfolio(self, snapshot: PortfolioSnapshot) -> None:
-        self._append_jsonl("portfolio.jsonl", portfolio_row(snapshot))
-
-    def append_equity_row(
-        self,
-        session: date,
-        equity: Decimal,
-        synthetic_mega_cap_proxy_equity: Decimal,
-        equal_weight_equity: Decimal,
-    ) -> None:
-        path = self.path("equity.csv")
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(
-                f"{session.isoformat()},{equity:.2f},"
-                f"{synthetic_mega_cap_proxy_equity:.2f},{equal_weight_equity:.2f}\n"
-            )
+        for name, records in projections.items():
+            content = "".join(json.dumps(record) + "\n" for record in records).encode()
+            replace_complete(self.path(name), content)
+            if failure_hook is not None:
+                failure_hook(f"after_artifact_replace:{name}")
+        replace_complete(self.path("equity.csv"), ("\n".join(equity_lines) + "\n").encode())
+        if failure_hook is not None:
+            failure_hook("after_artifact_replace:equity.csv")

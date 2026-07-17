@@ -82,11 +82,19 @@ def test_paper_step_order_replay_and_evaluate_are_idempotent(tmp_path: Path) -> 
     first = invoke("paper", "step", *common, "--session", "2024-01-05")
     assert first.exit_code == 0
     run_dir = tmp_path / run_id
-    before = {path.name: path.read_bytes() for path in run_dir.iterdir()}
+    before = {
+        str(path.relative_to(run_dir)): path.read_bytes()
+        for path in run_dir.rglob("*")
+        if path.is_file()
+    }
 
     repeated = invoke("paper", "step", *common, "--session", "2024-01-05")
     assert repeated.exit_code == 0
-    assert before == {path.name: path.read_bytes() for path in run_dir.iterdir()}
+    assert before == {
+        str(path.relative_to(run_dir)): path.read_bytes()
+        for path in run_dir.rglob("*")
+        if path.is_file()
+    }
 
     replayed = invoke("experiment", "replay", *common, "--format", "json")
     assert replayed.exit_code == 0

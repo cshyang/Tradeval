@@ -21,6 +21,7 @@ from retailtrader.simulation.runner import (
 )
 from retailtrader.storage.artifacts import read_jsonl
 from retailtrader.storage.events import EventLog
+from retailtrader.storage.transitions import FailureHook
 from tests.helpers import make_experiment, make_frame, stub_generator
 
 FIXTURE_RUN = Path(__file__).parents[2] / "tests/fixtures/demo-run/exp-trend-v1-2024"
@@ -61,6 +62,14 @@ ARTIFACTS = [
     "portfolio.jsonl",
     "equity.csv",
 ]
+PROJECTIONS = [
+    "events.jsonl",
+    "decisions.jsonl",
+    "orders.jsonl",
+    "fills.jsonl",
+    "portfolio.jsonl",
+    "equity.csv",
+]
 
 
 def snapshots() -> list:
@@ -82,15 +91,18 @@ def make_runner(
     philosophy_yaml: str = PHILOSOPHY_YAML,
     max_turnover: float | None = 0.10,
     data_provenance: dict[str, object] | None = None,
+    generate_target=stub_generator,
+    failure_hook: FailureHook | None = None,
 ) -> ExperimentRunner:
     return ExperimentRunner(
         experiment=experiment or make_experiment(),
         run_dir=run_dir,
-        generate_target=stub_generator,
+        generate_target=generate_target,
         benchmarks=BENCHMARKS,
         philosophy_yaml=philosophy_yaml,
         max_turnover=max_turnover,
         data_provenance=data_provenance,
+        failure_hook=failure_hook,
     )
 
 
@@ -110,13 +122,6 @@ def artifact_bytes(run_dir: Path) -> dict[str, bytes]:
     }
 
 
-def assert_resume_rejected_without_writes(run_dir: Path, match: str) -> None:
-    before = artifact_bytes(run_dir)
-    with pytest.raises(ResumeMismatchError, match=match):
-        make_runner(run_dir)
-    assert artifact_bytes(run_dir) == before
-
-
 def test_replay_and_forward_paper_produce_identical_artifacts(tmp_path: Path) -> None:
     replay_dir = tmp_path / "replay"
     forward_dir = tmp_path / "forward"
@@ -133,6 +138,80 @@ def test_replay_and_forward_paper_produce_identical_artifacts(tmp_path: Path) ->
     assert any(
         order["reason"] == "max turnover" for order in read_jsonl(replay_dir / "orders.jsonl")
     )
+
+
+def test_committed_journal_recovers_combined_timing_turnover_and_identity_contracts(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "recovered"
+    frame = snapshots()[0]
+    received = []
+
+    def recording_generator(experiment, snapshot):
+        received.append(snapshot)
+        return stub_generator(experiment, snapshot)
+
+    make_runner(run_dir, generate_target=recording_generator).step(frame)
+
+    assert received == [frame.decision]
+    events = EventLog(run_dir / "events.jsonl", "run-test").read()
+    execution_events = [
+        event
+        for event in events
+        if event["event_type"] in {"order_created", "order_rejected", "order_filled"}
+    ]
+    assert execution_events
+    assert {event["as_of"] for event in execution_events} == {
+        frame.execution_at.isoformat()
+    }
+    assert any(
+        event["event_type"] == "order_rejected"
+        and event["payload"]["reason"] == "max turnover"
+        for event in execution_events
+    )
+
+    journal = run_dir / f"transitions/{frame.execution_session.isoformat()}.json"
+    assert journal.is_file()
+    expected = {name: (run_dir / name).read_bytes() for name in ARTIFACTS + ["events.jsonl"]}
+    (run_dir / "orders.jsonl").write_text("", encoding="utf-8")
+
+    make_runner(run_dir, generate_target=recording_generator)
+
+    assert received == [frame.decision]
+    assert {
+        name: (run_dir / name).read_bytes() for name in ARTIFACTS + ["events.jsonl"]
+    } == expected
+
+    before = artifact_bytes(run_dir)
+    changed = make_experiment().model_copy(update={"universe_hash": "changed"})
+    with pytest.raises(ResumeMismatchError, match="universe_hash"):
+        make_runner(run_dir, experiment=changed)
+    assert artifact_bytes(run_dir) == before
+
+
+def test_restart_recovers_after_committed_journal_projection_failure(tmp_path: Path) -> None:
+    failed = False
+
+    def fail_once(point: str) -> None:
+        nonlocal failed
+        if point == "after_artifact_replace:orders.jsonl" and not failed:
+            failed = True
+            raise OSError("injected after orders projection")
+
+    run_dir = tmp_path / "interrupted"
+    with pytest.raises(OSError, match="injected"):
+        make_runner(run_dir, failure_hook=fail_once).step(snapshots()[0])
+
+    assert len(list((run_dir / "transitions").glob("*.json"))) == 1
+    make_runner(run_dir)
+    clean_dir = tmp_path / "clean"
+    make_runner(clean_dir).step(snapshots()[0])
+
+    for name in PROJECTIONS:
+        if name == "events.jsonl":
+            continue
+        assert (run_dir / name).read_bytes() == (clean_dir / name).read_bytes(), name
+    assert events_without_created_at(run_dir) == events_without_created_at(clean_dir)
 
 
 def test_repeated_session_processing_is_idempotent(tmp_path: Path) -> None:
@@ -289,7 +368,7 @@ def test_resume_rejects_changed_turnover_setting_without_writes(tmp_path: Path) 
     assert artifact_bytes(tmp_path) == before
 
 
-@pytest.mark.parametrize("missing", ["manifest.json", "philosophy.yaml", "events.jsonl"])
+@pytest.mark.parametrize("missing", ["manifest.json", "philosophy.yaml", "run-state.json"])
 def test_resume_rejects_missing_identity_artifacts_without_writes(
     tmp_path: Path, missing: str
 ) -> None:
@@ -303,7 +382,7 @@ def test_resume_rejects_missing_identity_artifacts_without_writes(
 
 @pytest.mark.parametrize(
     ("name", "contents"),
-    [("manifest.json", "{"), ("events.jsonl", "not-json\n")],
+    [("manifest.json", "{"), ("run-state.json", "not-json\n")],
 )
 def test_resume_rejects_malformed_identity_artifacts_without_writes(
     tmp_path: Path, name: str, contents: str
@@ -313,51 +392,6 @@ def test_resume_rejects_malformed_identity_artifacts_without_writes(
     before = artifact_bytes(tmp_path)
     with pytest.raises(ResumeMismatchError, match=name):
         make_runner(tmp_path)
-    assert artifact_bytes(tmp_path) == before
-
-
-def test_resume_rejects_mixed_event_run_ids_without_writes(tmp_path: Path) -> None:
-    make_runner(tmp_path).step(snapshots()[0])
-    path = tmp_path / "events.jsonl"
-    events = read_jsonl(path)
-    events[1]["run_id"] = "other-run"
-    path.write_text("".join(json.dumps(event) + "\n" for event in events))
-    before = artifact_bytes(tmp_path)
-
-    with pytest.raises(ResumeMismatchError, match="run_id"):
-        make_runner(tmp_path)
-
-    assert artifact_bytes(tmp_path) == before
-
-
-def test_resume_reconstructs_ledger_before_accepting_coherent_projections(
-    tmp_path: Path,
-) -> None:
-    make_runner(tmp_path).step(snapshots()[0])
-    events_path = tmp_path / "events.jsonl"
-    events = read_jsonl(events_path)
-    fill_event = next(event for event in events if event["event_type"] == "order_filled")
-    fill_event["payload"]["quantity"] += 1
-    events_path.write_text("".join(json.dumps(event) + "\n" for event in events))
-    fills_path = tmp_path / "fills.jsonl"
-    fills = read_jsonl(fills_path)
-    fills[0]["quantity"] += 1
-    fills_path.write_text("".join(json.dumps(fill) + "\n" for fill in fills))
-
-    assert_resume_rejected_without_writes(tmp_path, "ledger reconstruction failed")
-
-
-def test_resume_rejects_mixed_event_schema_versions_without_writes(tmp_path: Path) -> None:
-    make_runner(tmp_path).step(snapshots()[0])
-    path = tmp_path / "events.jsonl"
-    events = read_jsonl(path)
-    events[-1]["schema_version"] = 2
-    path.write_text("".join(json.dumps(event) + "\n" for event in events))
-    before = artifact_bytes(tmp_path)
-
-    with pytest.raises(ResumeMismatchError, match="schema_version"):
-        make_runner(tmp_path)
-
     assert artifact_bytes(tmp_path) == before
 
 
@@ -373,12 +407,12 @@ def test_resume_restores_initial_cash_and_as_of_from_portfolio_created(tmp_path:
     assert resumed.portfolio.as_of == datetime.fromisoformat(created["as_of"])
 
 
-def test_resume_rejects_portfolio_created_cash_mismatch(tmp_path: Path) -> None:
-    make_runner(tmp_path)
-    path = tmp_path / "events.jsonl"
-    events = read_jsonl(path)
-    events[0]["payload"]["cash"] = "1.00"
-    path.write_text("".join(json.dumps(event) + "\n" for event in events))
+def test_resume_rejects_run_state_cash_mismatch(tmp_path: Path) -> None:
+    make_runner(tmp_path).step(snapshots()[0])
+    path = tmp_path / "run-state.json"
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state["initial_cash"] = "1.00"
+    path.write_text(json.dumps(state), encoding="utf-8")
     before = artifact_bytes(tmp_path)
 
     with pytest.raises(ResumeMismatchError, match="initial_cash"):
@@ -395,103 +429,57 @@ def test_existing_partial_run_is_rejected_without_writes(tmp_path: Path) -> None
     assert artifact_bytes(tmp_path) == before
 
 
-def test_resume_rejects_portfolio_mark_without_terminal_event_or_duplicate_rows(
+@pytest.mark.parametrize("name", PROJECTIONS)
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_resume_rematerializes_public_projections_from_committed_journals(
+    tmp_path: Path, name: str, damage: str
+) -> None:
+    make_runner(tmp_path).replay(snapshots()[:2])
+    expected = {projection: (tmp_path / projection).read_bytes() for projection in PROJECTIONS}
+    path = tmp_path / name
+    if damage == "missing":
+        path.unlink()
+    else:
+        path.write_text("corrupt\n", encoding="utf-8")
+
+    make_runner(tmp_path)
+
+    assert {projection: (tmp_path / projection).read_bytes() for projection in PROJECTIONS} == expected
+
+
+def test_resume_rejects_corrupt_canonical_journal_without_projection_writes(
     tmp_path: Path,
 ) -> None:
     make_runner(tmp_path).step(snapshots()[0])
-    events_path = tmp_path / "events.jsonl"
-    events = read_jsonl(events_path)
-    assert events[-2]["event_type"] == "portfolio_marked"
-    assert events[-1]["event_type"] == "rebalance_completed"
-    events_path.write_text("".join(json.dumps(event) + "\n" for event in events[:-1]))
-    row_counts = {
-        name: len((tmp_path / name).read_text().splitlines())
-        for name in ("decisions.jsonl", "orders.jsonl", "fills.jsonl", "portfolio.jsonl", "equity.csv")
-    }
+    journal_path = next((tmp_path / "transitions").glob("*.json"))
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    journal["events"][0]["run_id"] = "other-run"
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    before = {projection: (tmp_path / projection).read_bytes() for projection in PROJECTIONS}
 
-    assert_resume_rejected_without_writes(tmp_path, "incomplete session")
+    with pytest.raises(ResumeMismatchError, match="run_id"):
+        make_runner(tmp_path)
 
-    assert {
-        name: len((tmp_path / name).read_text().splitlines()) for name in row_counts
-    } == row_counts
+    assert {projection: (tmp_path / projection).read_bytes() for projection in PROJECTIONS} == before
 
 
-def test_resume_rejects_transition_events_after_last_completed_session(tmp_path: Path) -> None:
-    runner = make_runner(tmp_path)
-    runner.step(snapshots()[0])
-    next_snapshot = snapshots()[1].decision
-    runner.event_log.append(
-        "target_generated",
-        next_snapshot.as_of,
-        {
-            "target": {
-                "run_id": "run-test",
-                "as_of": next_snapshot.as_of,
-                "cash_weight": 1.0,
-                "positions": [],
-            },
-            "decisions": [],
-        },
+def test_resume_rejects_journal_order_fill_mismatch_without_projection_writes(
+    tmp_path: Path,
+) -> None:
+    make_runner(tmp_path).step(snapshots()[0])
+    journal_path = next((tmp_path / "transitions").glob("*.json"))
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    created = next(
+        event for event in journal["events"] if event["event_type"] == "order_created"
     )
-    assert_resume_rejected_without_writes(tmp_path, "incomplete session")
+    created["payload"]["quantity"] += 1
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    before = {projection: (tmp_path / projection).read_bytes() for projection in PROJECTIONS}
 
+    with pytest.raises(ResumeMismatchError, match="bijection"):
+        make_runner(tmp_path)
 
-@pytest.mark.parametrize(
-    "name",
-    ["decisions.jsonl", "orders.jsonl", "fills.jsonl", "portfolio.jsonl", "equity.csv"],
-)
-def test_resume_rejects_missing_materialized_artifact_without_writes(
-    tmp_path: Path, name: str
-) -> None:
-    make_runner(tmp_path).replay(snapshots()[:2])
-    (tmp_path / name).unlink()
-    assert_resume_rejected_without_writes(tmp_path, name)
-
-
-@pytest.mark.parametrize(
-    ("name", "contents"),
-    [
-        ("decisions.jsonl", "{\n"),
-        ("orders.jsonl", "{\n"),
-        ("fills.jsonl", "{\n"),
-        ("portfolio.jsonl", "{\n"),
-        ("equity.csv", "not,the,required,header\n"),
-    ],
-)
-def test_resume_rejects_malformed_materialized_artifact_without_writes(
-    tmp_path: Path, name: str, contents: str
-) -> None:
-    make_runner(tmp_path).replay(snapshots()[:2])
-    (tmp_path / name).write_text(contents)
-    assert_resume_rejected_without_writes(tmp_path, name)
-
-
-@pytest.mark.parametrize(
-    "name",
-    ["decisions.jsonl", "orders.jsonl", "fills.jsonl", "portfolio.jsonl", "equity.csv"],
-)
-def test_resume_rejects_inconsistent_materialized_rows_without_writes(
-    tmp_path: Path, name: str
-) -> None:
-    make_runner(tmp_path).replay(snapshots()[:2])
-    path = tmp_path / name
-    if name == "equity.csv":
-        lines = path.read_text().splitlines()
-        fields = lines[-1].split(",")
-        fields[0] = "2099-01-01"
-        path.write_text("\n".join([*lines[:-1], ",".join(fields)]) + "\n")
-    else:
-        rows = read_jsonl(path)
-        if name == "decisions.jsonl":
-            rows.pop()
-        elif name == "orders.jsonl":
-            rows.append(rows[-1])
-        elif name == "fills.jsonl":
-            rows[0]["quantity"] += 1
-        else:
-            rows[-1]["total_equity"] = "1.00"
-        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-    assert_resume_rejected_without_writes(tmp_path, name)
+    assert {projection: (tmp_path / projection).read_bytes() for projection in PROJECTIONS} == before
 
 
 def test_completed_sessions_must_be_a_chronological_prefix() -> None:
