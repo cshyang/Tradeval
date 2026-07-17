@@ -1,5 +1,12 @@
-"""Market-data sources and provider-neutral price contracts."""
+"""Market-data sources, immutable cache, and provider-neutral contracts."""
 
+from retailtrader.data.cache import (
+    CachedDailyPriceSource,
+    DailyPriceLoader,
+    PriceCache,
+    PriceCacheIntegrityError,
+    PriceFetchResult,
+)
 from retailtrader.data.protocol import (
     AvailableMarketBar,
     DailyPriceSource,
@@ -14,8 +21,13 @@ from retailtrader.data.protocol import (
 
 __all__ = [
     "AvailableMarketBar",
+    "CachedDailyPriceSource",
+    "DailyPriceLoader",
     "DailyPriceSource",
     "PriceBatch",
+    "PriceCache",
+    "PriceCacheIntegrityError",
+    "PriceFetchResult",
     "PriceQuery",
     "canonical_json",
     "canonical_normalized_rows",
