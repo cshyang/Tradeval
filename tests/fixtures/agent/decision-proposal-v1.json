@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "experiment_id": "exp-buffett-001",
+  "decision_at": "2025-01-31T21:00:00Z",
+  "candidate_set_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "agent_protocol_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "decisions": [
+    {
+      "symbol": "AAPL",
+      "stance": "buy",
+      "confidence": 0.74,
+      "desired_weight": 0.08,
+      "thesis": "Durable cash generation and high returns on capital",
+      "evidence_refs": ["obs-41", "obs-87"],
+      "risks": ["valuation compression"],
+      "invalidating_conditions": ["ROIC below 20%"],
+      "intended_holding_period": "3-5 years"
+    }
+  ],
+  "abstentions": []
+}
