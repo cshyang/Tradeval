@@ -123,10 +123,9 @@ git commit -am "refactor: reconcile live data with simulation integrity"
 Execute the remaining tasks in `docs/plans/2026-07-16-live-market-data.md` after rebasing. Preserve its synthetic offline default and explicit provenance. The acceptance gate for AgentTrader is:
 
 ```bash
-uv run retailtrader market replay \
+uv sync --extra data-openbb
+uv run retailtrader market-replay \
   --workspace runs/live-smoke \
-  --philosophy philosophies/trend-v1.yaml \
-  --provider yfinance \
   --start 2024-01-05 --end 2024-06-28 \
   --format json
 ```
