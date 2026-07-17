@@ -94,6 +94,40 @@ def test_replay_reconstructs_cash_positions_cost_basis_and_equity_exactly() -> N
     assert state.last_marked_as_of == AS_OF.isoformat()
 
 
+def test_replay_sums_individually_rounded_position_values_like_engine() -> None:
+    events = [
+        event("portfolio_created", {"cash": "10.00"}),
+        fill("buy", 1, "1.00", "AAA"),
+        fill("buy", 1, "1.00", "BBB"),
+        event(
+            "portfolio_marked",
+            {
+                "as_of": AS_OF.isoformat(),
+                "cash": "8.00",
+                "positions": [
+                    {
+                        "symbol": "AAA",
+                        "quantity": 1,
+                        "price": "1.005",
+                        "value": "1.00",
+                    },
+                    {
+                        "symbol": "BBB",
+                        "quantity": 1,
+                        "price": "1.005",
+                        "value": "1.00",
+                    },
+                ],
+                "total_equity": "10.00",
+            },
+        ),
+    ]
+
+    state = replay_events(events)
+
+    assert state.equity == Decimal("10.00")
+
+
 def test_selling_the_full_position_clears_basis() -> None:
     state = replay_events(
         [
