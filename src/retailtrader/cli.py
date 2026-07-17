@@ -84,6 +84,7 @@ EXPORT_ARTIFACTS = (
     "decisions.jsonl",
     "portfolio.jsonl",
     "evaluation.json",
+    "data-provenance.json",
 )
 
 
@@ -541,6 +542,50 @@ def _display_rejected(row: dict) -> dict:
     }
 
 
+_PUBLIC_PROVENANCE_FIELDS = (
+    "kind",
+    "validity",
+    "label",
+    "transport",
+    "provider",
+    "provider_versions",
+    "adjustment",
+    "retrieved_at",
+    "query_hash",
+    "normalized_hash",
+    "benchmark_kind",
+    "reference_method_version",
+    "execution_model_version",
+    "warnings",
+)
+
+
+def _public_provenance(run_dir: Path) -> dict[str, Any]:
+    path = run_dir / "data-provenance.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} must contain an object")
+    required = {
+        "kind",
+        "validity",
+        "label",
+        "transport",
+        "provider",
+        "adjustment",
+        "benchmark_kind",
+        "reference_method_version",
+        "execution_model_version",
+    }
+    missing = sorted(required - set(payload))
+    if missing:
+        raise ValueError(f"{path} missing provenance fields: {missing}")
+    return {
+        key: payload[key]
+        for key in _PUBLIC_PROVENANCE_FIELDS
+        if key in payload
+    }
+
+
 def _view_model(runs: list[tuple[dict, Path]]) -> dict:
     """Aggregate exported artifacts into the frontend's single-fetch view model.
 
@@ -590,6 +635,7 @@ def _view_model(runs: list[tuple[dict, Path]]) -> dict:
                 "universe": universe_name,
                 "spec_yaml": spec_yaml,
                 "tagline": _tagline(spec_yaml),
+                "data_provenance": _public_provenance(run_dir),
                 "equity": [f"{p.equity:.2f}" for p in points],
                 "rebalances": rebalances,
                 "evaluation": {

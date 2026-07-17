@@ -71,6 +71,7 @@ export default function Page() {
   }, []);
 
   const T = THEMES[theme];
+  const activeProvenance = data?.experiments[expIdx]?.data_provenance;
   const vars = {
     "--bg": T.bg, "--ink": T.ink, "--mut": T.mut,
     "--fnt": T.fnt, "--hl": T.hl, "--pan": T.pan,
@@ -94,7 +95,12 @@ export default function Page() {
       <aside style={{ width: 236, flex: "none", display: "flex", flexDirection: "column", borderRight: "1px solid var(--hl)", padding: "18px 0 14px", minHeight: 0 }}>
         <div style={{ padding: "0 20px 16px", borderBottom: "1px solid var(--hl)" }}>
           <div style={{ fontFamily: SERIF, fontSize: 21, fontWeight: 500, letterSpacing: "-0.01em" }}>Philosophy Lab</div>
-          <div style={{ fontSize: 9.5, letterSpacing: "0.12em", fontWeight: 500, color: "var(--mut)", marginTop: 5 }}>SYNTHETIC DEMO DATA</div>
+          <div
+            title={activeProvenance?.warnings?.join("\n")}
+            style={{ fontSize: 9.5, letterSpacing: "0.12em", fontWeight: 500, color: "var(--mut)", marginTop: 5 }}
+          >
+            {activeProvenance?.label ?? "LOADING RUN PROVENANCE"}
+          </div>
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: "14px 12px", borderBottom: "1px solid var(--hl)" }}>
@@ -130,8 +136,8 @@ export default function Page() {
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "14px 20px 0", borderTop: "1px solid var(--hl)" }}>
-          <div title="Available when a broker is connected" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "not-allowed", userSelect: "none", opacity: 0.55 }}>
-            <span style={{ fontSize: 12, color: "var(--mut)" }}>Live paper mode</span>
+          <div title="Forward paper mode is not included in this historical replay build" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "not-allowed", userSelect: "none", opacity: 0.55 }}>
+            <span style={{ fontSize: 12, color: "var(--mut)" }}>Forward paper mode</span>
             <div style={{ width: 32, height: 18, borderRadius: 9, background: "var(--fnt)", border: "1px solid var(--hl)", position: "relative" }}>
               <div style={{ position: "absolute", top: 2, left: 2, width: 12, height: 12, borderRadius: "50%", background: "var(--mut)" }} />
             </div>
@@ -159,6 +165,11 @@ export default function Page() {
               <span>engine {data.experiments[expIdx].engine_version}</span>
               <span>run {data.experiments[expIdx].content_hash}</span>
               <span>universe {data.experiments[expIdx].universe}</span>
+              <span title={data.experiments[expIdx].data_provenance.warnings?.join("\n")}>
+                data {data.experiments[expIdx].data_provenance.transport}/{data.experiments[expIdx].data_provenance.provider}
+                {" · "}{data.experiments[expIdx].data_provenance.adjustment}
+                {" · "}{data.experiments[expIdx].data_provenance.validity}
+              </span>
               <span style={{ marginLeft: "auto", fontFamily: SERIF, fontStyle: "italic", fontSize: 12 }}>artifacts are the API — no values computed client-side</span>
             </footer>
           </>
