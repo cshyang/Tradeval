@@ -14,13 +14,13 @@ def invoke(*args: str):
     return runner.invoke(app, list(args), catch_exceptions=False)
 
 
-def test_help_lists_complete_synthetic_lifecycle() -> None:
+def test_help_lists_synthetic_lifecycle_and_opt_in_market_replay() -> None:
     result = invoke("--help")
 
     assert result.exit_code == 0
     assert "experiment" in result.stdout
     assert "paper" in result.stdout
-    assert "data" not in result.stdout
+    assert "market-replay" in result.stdout
 
 
 def test_philosophy_validate_has_stable_json_output() -> None:

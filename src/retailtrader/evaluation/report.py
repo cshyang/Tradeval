@@ -8,7 +8,7 @@ research-only disclaimer.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +73,18 @@ def _metric_rows(values: dict[str, Any], labels: dict[str, str]) -> list[str]:
     return [f"| {labels[key]} | {rounded[key]} |" for key in labels]
 
 
-def render_report_md(manifest: ExperimentManifest, report: EvaluationReport) -> str:
+def _provenance_value(value: Any) -> str:
+    serialized = to_jsonable(value)
+    if isinstance(serialized, (dict, list)):
+        return json.dumps(serialized, sort_keys=True)
+    return str(serialized)
+
+
+def render_report_md(
+    manifest: ExperimentManifest,
+    report: EvaluationReport,
+    data_provenance: Mapping[str, Any] | None = None,
+) -> str:
     lines = [
         f"# Evaluation — {manifest.philosophy_name} {manifest.philosophy_version}",
         "",
@@ -95,11 +106,41 @@ def render_report_md(manifest: ExperimentManifest, report: EvaluationReport) -> 
         f"| Cadence | {manifest.cadence} |",
         f"| Window | {manifest.start.isoformat()} to {manifest.end.isoformat()} |",
         "",
+    ]
+    if data_provenance is not None:
+        labels = {
+            "kind": "Data kind",
+            "validity": "Validity",
+            "label": "Display label",
+            "transport": "Transport",
+            "provider": "Provider",
+            "provider_versions": "Provider versions",
+            "adjustment": "Adjustment",
+            "retrieved_at": "Retrieved at",
+            "query_hash": "Query hash",
+            "normalized_hash": "Normalized data hash",
+            "benchmark_kind": "Benchmark kind",
+            "reference_method_version": "Reference method",
+            "execution_model_version": "Execution model",
+        }
+        lines.extend(["## Data provenance", "", "| Input | Value |", "| --- | --- |"])
+        for key, label in labels.items():
+            if key in data_provenance:
+                lines.append(f"| {label} | {_provenance_value(data_provenance[key])} |")
+        warnings = data_provenance.get("warnings", [])
+        if warnings:
+            lines.extend(["", "### Provenance warnings", ""])
+            lines.extend(f"- {warning}" for warning in warnings)
+        lines.append("")
+    metric_labels = dict(_METRIC_LABELS)
+    if data_provenance is not None and data_provenance.get("kind") == "real_market":
+        metric_labels["synthetic_mega_cap_proxy_relative"] = "Return vs SPY"
+    lines.extend([
         "## Performance",
         "",
         "| Metric | Value |",
         "| --- | --- |",
-        *_metric_rows(report.metrics.model_dump(), _METRIC_LABELS),
+        *_metric_rows(report.metrics.model_dump(), metric_labels),
         "",
         "## Philosophy fidelity",
         "",
@@ -107,12 +148,19 @@ def render_report_md(manifest: ExperimentManifest, report: EvaluationReport) -> 
         "| --- | --- |",
         *_metric_rows(report.fidelity.model_dump(), _FIDELITY_LABELS),
         "",
-    ]
+    ])
     return "\n".join(lines)
 
 
-def write_report_md(manifest: ExperimentManifest, report: EvaluationReport, path: Path) -> None:
-    path.write_text(render_report_md(manifest, report), encoding="utf-8")
+def write_report_md(
+    manifest: ExperimentManifest,
+    report: EvaluationReport,
+    path: Path,
+    data_provenance: Mapping[str, Any] | None = None,
+) -> None:
+    path.write_text(
+        render_report_md(manifest, report, data_provenance), encoding="utf-8"
+    )
 
 
 def render_comparison_md(
@@ -126,7 +174,7 @@ def render_comparison_md(
         "",
         DISCLAIMER,
         "",
-        "Synthetic data and benchmark sources:",
+        "Data and benchmark sources:",
         *[
             f"- {manifest.data_source}; {manifest.benchmark_source}"
             for manifest, _ in runs
@@ -137,7 +185,10 @@ def render_comparison_md(
     ]
     metric_dumps = [_rounded(report.metrics.model_dump()) for _, report in runs]
     fidelity_dumps = [_rounded(report.fidelity.model_dump()) for _, report in runs]
-    for key, label in _METRIC_LABELS.items():
+    metric_labels = dict(_METRIC_LABELS)
+    if all(manifest.benchmark_source.startswith("spy-") for manifest, _ in runs):
+        metric_labels["synthetic_mega_cap_proxy_relative"] = "Return vs SPY"
+    for key, label in metric_labels.items():
         cells = [str(dump[key]) for dump in metric_dumps]
         lines.append(f"| {label} | " + " | ".join(cells) + " |")
     for key, label in _FIDELITY_LABELS.items():

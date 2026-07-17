@@ -13,6 +13,7 @@ symbols always process in ascending order.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 
 from retailtrader.domain import (
@@ -55,9 +56,13 @@ def execute_rebalance(
     portfolio: PortfolioSnapshot,
     target: TargetPortfolio,
     snapshot: MarketSnapshot,
+    *,
+    filled_at: datetime,
     slippage_bps: int = 0,
     max_turnover: float | None = None,
 ) -> ExecutionResult:
+    if filled_at.tzinfo is None or filled_at.utcoffset() is None:
+        raise ValueError("filled_at must be timezone-aware")
     if max_turnover is not None and not 0 <= max_turnover <= 1:
         raise ValueError("max_turnover must be within [0, 1]")
     bars = {bar.symbol: bar for bar in snapshot.bars}
@@ -130,7 +135,7 @@ def execute_rebalance(
         orders.append(
             OrderIntent(
                 run_id=portfolio.run_id,
-                as_of=snapshot.as_of,
+                as_of=filled_at,
                 symbol=symbol,
                 side="sell",
                 quantity=quantity,
@@ -143,7 +148,7 @@ def execute_rebalance(
                 side="sell",
                 quantity=quantity,
                 fill_price=price,
-                filled_at=snapshot.as_of,
+                filled_at=filled_at,
             )
         )
         cash += Decimal(quantity) * price
@@ -167,7 +172,7 @@ def execute_rebalance(
         orders.append(
             OrderIntent(
                 run_id=portfolio.run_id,
-                as_of=snapshot.as_of,
+                as_of=filled_at,
                 symbol=symbol,
                 side="buy",
                 quantity=fill_quantity,
@@ -180,7 +185,7 @@ def execute_rebalance(
                 side="buy",
                 quantity=fill_quantity,
                 fill_price=price,
-                filled_at=snapshot.as_of,
+                filled_at=filled_at,
             )
         )
         cash -= Decimal(fill_quantity) * price

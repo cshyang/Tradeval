@@ -88,9 +88,9 @@ class EventLog:
             return [json.loads(line) for line in handle if line.strip()]
 
     def completed_sessions(self) -> set[str]:
-        """ISO `as_of` values of sessions already sealed by rebalance_completed."""
+        """ISO date keys of sessions already sealed by rebalance_completed."""
         return {
-            event["as_of"]
+            event["payload"]["session"]
             for event in self.read()
             if event["event_type"] == "rebalance_completed"
         }

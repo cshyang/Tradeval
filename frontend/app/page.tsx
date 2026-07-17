@@ -81,6 +81,7 @@ export default function Page() {
   }, []);
 
   const T = THEMES[theme];
+  const activeProvenance = data?.experiments[expIdx]?.data_provenance;
   const vars = {
     "--bg": T.bg, "--ink": T.ink, "--mut": T.mut,
     "--fnt": T.fnt, "--hl": T.hl, "--pan": T.pan,
@@ -104,7 +105,12 @@ export default function Page() {
       <aside className="sidebar" style={{ width: 236, flex: "none", display: "flex", flexDirection: "column", borderRight: "1px solid var(--hl)", padding: "18px 0 14px", minHeight: 0 }}>
         <div style={{ padding: "0 20px 16px", borderBottom: "1px solid var(--hl)" }}>
           <div style={{ fontFamily: SERIF, fontSize: 21, fontWeight: 500, letterSpacing: "-0.01em" }}>Philosophy Lab</div>
-          <div style={{ fontSize: 9.5, letterSpacing: "0.12em", fontWeight: 500, color: "var(--mut)", marginTop: 5 }}>SYNTHETIC DEMO DATA</div>
+          <div
+            title={activeProvenance?.warnings?.join("\n")}
+            style={{ fontSize: 9.5, letterSpacing: "0.12em", fontWeight: 500, color: "var(--mut)", marginTop: 5 }}
+          >
+            {activeProvenance?.label ?? "LOADING RUN PROVENANCE"}
+          </div>
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 2, padding: "14px 12px", borderBottom: "1px solid var(--hl)" }}>
@@ -140,8 +146,8 @@ export default function Page() {
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "14px 20px 0", borderTop: "1px solid var(--hl)" }}>
-          <div title="Available when a broker is connected" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "not-allowed", userSelect: "none", opacity: 0.55 }}>
-            <span style={{ fontSize: 12, color: "var(--mut)" }}>Live paper mode</span>
+          <div title="Forward paper mode is not included in this historical replay build" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "not-allowed", userSelect: "none", opacity: 0.55 }}>
+            <span style={{ fontSize: 12, color: "var(--mut)" }}>Forward paper mode</span>
             <div style={{ width: 32, height: 18, borderRadius: 9, background: "var(--fnt)", border: "1px solid var(--hl)", position: "relative" }}>
               <div style={{ position: "absolute", top: 2, left: 2, width: 12, height: 12, borderRadius: "50%", background: "var(--mut)" }} />
             </div>
@@ -173,6 +179,13 @@ export default function Page() {
               <span>engine {data.experiments[expIdx].engine_version}</span>
               <span>run {data.experiments[expIdx].content_hash}</span>
               <span>universe {data.experiments[expIdx].universe}</span>
+              <span title={data.experiments[expIdx].data_provenance.warnings?.join("\n")}>
+                data {data.experiments[expIdx].data_provenance.transport}/{data.experiments[expIdx].data_provenance.provider}
+                {" · "}{data.experiments[expIdx].data_provenance.adjustment}
+                {" · "}{data.experiments[expIdx].data_provenance.validity}
+                {" · "}{data.experiments[expIdx].data_provenance.benchmark_kind}
+                {" / "}{data.experiments[expIdx].data_provenance.reference_method_version}
+              </span>
               <span style={{ marginLeft: "auto", fontFamily: SERIF, fontStyle: "italic", fontSize: 12 }}>artifacts are the API — no values computed client-side</span>
             </footer>
           </>
@@ -298,6 +311,7 @@ function Replay({ data, T, exp, color, rebIdx, symIdx, setReb, setSym }: {
 
   const rebs = exp.rebalances;
   const reb = rebs[rebIdx];
+  const referenceLabel = exp.data_provenance.kind === "real_market" ? "SPY" : "Synthetic mega-cap proxy";
   const vs = reb.relative_to_synthetic_mega_cap_proxy;
   // ponytail: the weekly demo cadence puts a marker on every point (130), where
   // the design assumed a sparser timeline — shrink the dot so the curve reads.
@@ -320,7 +334,7 @@ function Replay({ data, T, exp, color, rebIdx, symIdx, setReb, setSym }: {
             </div>
             {SHOW_BENCHMARKS && (
               <>
-                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}><div style={{ width: 16, height: 0, borderTop: "2px dashed var(--mut)" }} />Mega-cap proxy</div>
+                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}><div style={{ width: 16, height: 0, borderTop: "2px dashed var(--mut)" }} />{referenceLabel}</div>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}><div style={{ width: 16, height: 0, borderTop: "2px dotted var(--mut)" }} />Equal-weight</div>
               </>
             )}
@@ -328,8 +342,8 @@ function Replay({ data, T, exp, color, rebIdx, symIdx, setReb, setSym }: {
         </div>
         <div style={{ display: "flex", alignItems: "baseline", gap: 22, marginBottom: 6 }}>
           <div style={{ fontFamily: MONO, fontSize: 22, color: "var(--ink)" }}>{money(exp.equity[reb.week])}</div>
-          <div style={{ fontFamily: MONO, fontSize: 12, color: "var(--mut)" }}>as of <span style={{ color: "var(--ink)" }}>{reb.as_of}</span></div>
-           <div style={{ fontFamily: MONO, fontSize: 12, color: vs >= 0 ? T.gain : T.loss }}>{pct(vs, true)} vs synthetic mega-cap proxy</div>
+          <div style={{ fontFamily: MONO, fontSize: 12, color: "var(--mut)" }}>as of <span style={{ color: "var(--ink)" }}>{reb.execution_as_of}</span></div>
+           <div style={{ fontFamily: MONO, fontSize: 12, color: vs >= 0 ? T.gain : T.loss }}>{pct(vs, true)} vs {referenceLabel}</div>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginLeft: "auto" }}>
             <button onClick={() => setReb(Math.max(0, rebIdx - 1))} style={{ fontFamily: SANS, fontSize: 14, background: "transparent", color: "var(--ink)", border: "1px solid var(--hl)", borderRadius: 6, width: 30, height: 26, cursor: "pointer" }}>‹</button>
             <div style={{ fontSize: 12, color: "var(--mut)", whiteSpace: "nowrap" }}>rebalance <span style={{ color: "var(--ink)", fontWeight: 500 }}>{rebIdx + 1}</span> / {rebs.length}</div>
@@ -351,7 +365,7 @@ function Replay({ data, T, exp, color, rebIdx, symIdx, setReb, setSym }: {
           <path d={path(eq)} fill="none" style={{ stroke: "var(--ink)" }} strokeWidth="1.8" />
           <line x1={X(reb.week).toFixed(1)} x2={X(reb.week).toFixed(1)} y1="0" y2={H} stroke={color} strokeWidth="1.4" opacity="0.6" />
           {rebs.map((rb, i) => (
-            <circle key={i} role="button" tabIndex={0} aria-label={`Rebalance ${i + 1} on ${rb.as_of}`} onClick={() => setReb(i)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setReb(i); }} cx={X(rb.week).toFixed(1)} cy={Y(eq[rb.week]).toFixed(1)}
+            <circle key={i} role="button" tabIndex={0} aria-label={`Rebalance ${i + 1} executed ${rb.execution_as_of}`} onClick={() => setReb(i)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") setReb(i); }} cx={X(rb.week).toFixed(1)} cy={Y(eq[rb.week]).toFixed(1)}
               r={i === rebIdx ? 6 : dotR} fill={i === rebIdx ? color : T.bg}
               style={{ stroke: "var(--ink)" }} strokeWidth="1.3" cursor="pointer" />
           ))}
@@ -431,10 +445,11 @@ type Row =
 function Compare({ data, T }: { data: RunData; T: Theme }) {
   const exps = data.experiments;
   const bm = data.benchmarks;
+  const referenceLabel = data.data_provenance.kind === "real_market" ? "SPY" : "Synthetic mega-cap proxy";
   const cols = exps
     .map((e, i) => ({ label: e.label, color: PALETTE[i % PALETTE.length], dot: true }))
     .concat([
-      { label: "Mega-cap proxy", color: T.mut, dot: false },
+      { label: referenceLabel, color: T.mut, dot: false },
       { label: "Equal-wt", color: T.mut, dot: false },
     ]);
 
@@ -474,7 +489,7 @@ function Compare({ data, T }: { data: RunData; T: Theme }) {
     row("Avg holding (days)", "avg_holding_days", fmtNum, 0),
     row("Cash exposure", "cash_exposure", fmtPct0, 0),
     row("Max concentration", "max_concentration", fmtPct0, 0),
-    row("vs mega-cap proxy", "synthetic_mega_cap_proxy_relative", fmtPctS, 1),
+    row(`vs ${referenceLabel}`, "synthetic_mega_cap_proxy_relative", fmtPctS, 1),
     { isSection: true, label: "PHILOSOPHY FIDELITY" },
     frow("Factor coverage", "factor_coverage", fmtPct0, 1),
     frow("Constraint interventions", "constraint_interventions", fmtNum, -1),

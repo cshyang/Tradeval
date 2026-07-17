@@ -10,10 +10,11 @@ import pytest
 
 from retailtrader.domain import PortfolioSnapshot, Position, TargetPortfolio, TargetPosition
 from retailtrader.simulation.execution import execute_rebalance, fill_price
-from tests.helpers import RUN_ID, close_dt, make_snapshot
+from tests.helpers import RUN_ID, close_dt, make_snapshot, open_dt
 
 DAY0 = date(2024, 1, 5)
 DAY1 = date(2024, 1, 8)
+EXECUTION_AT = open_dt(DAY1)
 
 
 def cash_portfolio(cash: str) -> PortfolioSnapshot:
@@ -49,6 +50,7 @@ def test_buys_fill_at_open_with_integer_shares() -> None:
         cash_portfolio("1000.00"),
         make_target({"AAA": 0.5, "BBB": 0.4}, cash_weight=0.1),
         snapshot,
+        filled_at=EXECUTION_AT,
     )
     assert [(f.symbol, f.side, f.quantity, f.fill_price) for f in result.fills] == [
         ("AAA", "buy", 50, Decimal("10.00")),
@@ -58,7 +60,9 @@ def test_buys_fill_at_open_with_integer_shares() -> None:
     # Marked at session close, not at the fill price.
     assert result.portfolio.positions[0].value == Decimal("550.00")
     assert result.portfolio.total_equity == Decimal("1030.00")
-    assert all(fill.filled_at == snapshot.as_of for fill in result.fills)
+    assert all(fill.filled_at == EXECUTION_AT for fill in result.fills)
+    assert all(order.as_of == EXECUTION_AT for order in result.orders)
+    assert result.portfolio.as_of == snapshot.as_of
 
 
 def test_slippage_raises_buy_cost_but_not_sizing() -> None:
@@ -67,6 +71,7 @@ def test_slippage_raises_buy_cost_but_not_sizing() -> None:
         cash_portfolio("1000.00"),
         make_target({"AAA": 0.5, "BBB": 0.4}, cash_weight=0.1),
         snapshot,
+        filled_at=EXECUTION_AT,
         slippage_bps=100,
     )
     assert [(f.quantity, f.fill_price) for f in result.fills] == [
@@ -82,14 +87,14 @@ def test_sells_execute_before_buys_and_fund_them() -> None:
         as_of=close_dt(DAY0),
         cash=Decimal("10.00"),
         positions=(
-            Position(
-                symbol="AAA", quantity=50, price=Decimal("10.00"), value=Decimal("500.00")
-            ),
+            Position(symbol="AAA", quantity=50, price=Decimal("10.00"), value=Decimal("500.00")),
         ),
         total_equity=Decimal("510.00"),
     )
     snapshot = make_snapshot(DAY1, {"AAA": ("10.00", "10.00"), "BBB": ("10.00", "10.00")})
-    result = execute_rebalance(portfolio, make_target({"BBB": 0.95}, cash_weight=0.05), snapshot)
+    result = execute_rebalance(
+        portfolio, make_target({"BBB": 0.95}, cash_weight=0.05), snapshot, filled_at=EXECUTION_AT
+    )
     assert [(f.symbol, f.side, f.quantity) for f in result.fills] == [
         ("AAA", "sell", 50),
         ("BBB", "buy", 48),
@@ -104,6 +109,7 @@ def test_buy_is_capped_and_shortfall_rejected_so_cash_never_goes_negative() -> N
         cash_portfolio("1000.00"),
         make_target({"AAA": 0.5, "BBB": 0.5}, cash_weight=0.0),
         snapshot,
+        filled_at=EXECUTION_AT,
         slippage_bps=200,
     )
     # Sized at open: 50 each. AAA fills first at 10.20 (510.00), leaving 490.00,
@@ -122,6 +128,7 @@ def test_unaffordable_buy_is_fully_rejected() -> None:
         cash_portfolio("1000.00"),
         make_target({"AAA": 0.94, "BBB": 0.06}, cash_weight=0.0),
         snapshot,
+        filled_at=EXECUTION_AT,
         slippage_bps=100,
     )
     assert [(f.symbol, f.quantity) for f in result.fills] == [("AAA", 94)]
@@ -137,7 +144,7 @@ def test_symbols_process_in_stable_order_regardless_of_target_order() -> None:
         {"AAA": ("10.00", "10.00"), "BBB": ("10.00", "10.00"), "CCC": ("10.00", "10.00")},
     )
     target = make_target({"CCC": 0.3, "AAA": 0.3, "BBB": 0.3}, cash_weight=0.1)
-    result = execute_rebalance(cash_portfolio("1000.00"), target, snapshot)
+    result = execute_rebalance(cash_portfolio("1000.00"), target, snapshot, filled_at=EXECUTION_AT)
     assert [f.symbol for f in result.fills] == ["AAA", "BBB", "CCC"]
     assert [p.symbol for p in result.portfolio.positions] == ["AAA", "BBB", "CCC"]
 
@@ -148,14 +155,14 @@ def test_positions_missing_from_target_are_fully_sold() -> None:
         as_of=close_dt(DAY0),
         cash=Decimal("0.00"),
         positions=(
-            Position(
-                symbol="CCC", quantity=10, price=Decimal("10.00"), value=Decimal("100.00")
-            ),
+            Position(symbol="CCC", quantity=10, price=Decimal("10.00"), value=Decimal("100.00")),
         ),
         total_equity=Decimal("100.00"),
     )
     snapshot = make_snapshot(DAY1, {"AAA": ("10.00", "10.00"), "CCC": ("10.00", "10.00")})
-    result = execute_rebalance(portfolio, make_target({"AAA": 0.9}, cash_weight=0.1), snapshot)
+    result = execute_rebalance(
+        portfolio, make_target({"AAA": 0.9}, cash_weight=0.1), snapshot, filled_at=EXECUTION_AT
+    )
     assert result.fills[0].symbol == "CCC"
     assert result.fills[0].side == "sell"
     assert result.fills[0].quantity == 10
@@ -169,6 +176,7 @@ def test_missing_bar_for_held_or_targeted_symbol_raises() -> None:
             cash_portfolio("1000.00"),
             make_target({"AAA": 0.5, "BBB": 0.4}, cash_weight=0.1),
             snapshot,
+            filled_at=EXECUTION_AT,
         )
 
 
@@ -203,6 +211,7 @@ def test_max_turnover_scales_a_rotation_and_rejects_omitted_quantities() -> None
         rotation_portfolio(),
         make_target({"BBB": 1.0}, cash_weight=0.0),
         snapshot,
+        filled_at=EXECUTION_AT,
         max_turnover=0.25,
     )
 
@@ -224,6 +233,7 @@ def test_zero_turnover_cap_produces_no_fills() -> None:
         rotation_portfolio(),
         make_target({"BBB": 1.0}, cash_weight=0.0),
         snapshot,
+        filled_at=EXECUTION_AT,
         max_turnover=0,
     )
 
@@ -242,12 +252,16 @@ def test_zero_turnover_cap_produces_no_fills() -> None:
 def test_none_turnover_cap_preserves_uncapped_behavior() -> None:
     snapshot = make_snapshot(DAY1, {"AAA": ("10.00", "10.00"), "BBB": ("10.00", "10.00")})
     uncapped = execute_rebalance(
-        rotation_portfolio(), make_target({"BBB": 1.0}, cash_weight=0.0), snapshot
+        rotation_portfolio(),
+        make_target({"BBB": 1.0}, cash_weight=0.0),
+        snapshot,
+        filled_at=EXECUTION_AT,
     )
     explicit_none = execute_rebalance(
         rotation_portfolio(),
         make_target({"BBB": 1.0}, cash_weight=0.0),
         snapshot,
+        filled_at=EXECUTION_AT,
         max_turnover=None,
     )
     assert explicit_none == uncapped
@@ -260,6 +274,7 @@ def test_turnover_uses_slippage_adjusted_notional_and_never_exceeds_cap() -> Non
         rotation_portfolio("10.00"),
         make_target({"BBB": 1.0}, cash_weight=0.0),
         snapshot,
+        filled_at=EXECUTION_AT,
         slippage_bps=100,
         max_turnover=0.25,
     )
@@ -282,6 +297,7 @@ def test_turnover_rejections_are_in_ascending_symbol_order() -> None:
         cash_portfolio("1000.00"),
         make_target({"CCC": 0.4, "AAA": 0.3, "BBB": 0.3}, cash_weight=0.0),
         snapshot,
+        filled_at=EXECUTION_AT,
         max_turnover=0.2,
     )
     assert [r.symbol for r in result.rejections] == ["AAA", "BBB", "CCC"]

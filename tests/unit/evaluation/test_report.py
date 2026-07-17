@@ -87,6 +87,37 @@ def test_report_md_includes_identity_benchmarks_and_disclaimer() -> None:
     assert "Constraint interventions | 3" in text
 
 
+def test_report_md_renders_real_data_provenance_and_warnings() -> None:
+    provenance = {
+        "kind": "real_market",
+        "validity": "hindsight_current_universe",
+        "label": "HINDSIGHT · ADJUSTED MARKET DATA",
+        "transport": "openbb",
+        "provider": "yfinance",
+        "provider_versions": [["openbb", "4.7.2"]],
+        "adjustment": "splits_and_dividends",
+        "retrieved_at": datetime(2025, 1, 3, 12, tzinfo=UTC),
+        "query_hash": "a" * 64,
+        "normalized_hash": "b" * 64,
+        "benchmark_kind": "no_cost_reference",
+        "reference_method_version": "execution_open_fixed_basket_v1",
+        "execution_model_version": "prior_close_next_open_v1",
+        "warnings": ["Fixed-universe survivorship warning."],
+    }
+
+    text = render_report_md(make_experiment(), make_report(), provenance)
+
+    assert "## Data provenance" in text
+    assert "hindsight_current_universe" in text
+    assert "openbb" in text and "yfinance" in text
+    assert "splits_and_dividends" in text
+    assert "2025-01-03T12:00:00+00:00" in text
+    assert "no_cost_reference" in text
+    assert "Return vs SPY" in text
+    assert "Return vs synthetic mega-cap proxy" not in text
+    assert "Fixed-universe survivorship warning." in text
+
+
 def test_comparison_md_covers_all_runs_and_disclaimer() -> None:
     runs = [(make_experiment(), make_report()), (make_experiment("run-2"), make_report("run-2"))]
     text = render_comparison_md(runs)

@@ -49,16 +49,22 @@ class EquityPoint:
 
 def read_equity_csv(path: Path) -> list[EquityPoint]:
     with path.open(encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fields = set(reader.fieldnames or ())
+        if "synthetic_mega_cap_proxy_equity" in fields:
+            reference_column = "synthetic_mega_cap_proxy_equity"
+        elif "spy_equity" in fields:
+            reference_column = "spy_equity"
+        else:
+            raise ValueError("equity.csv has no supported reference-equity column")
         return [
             EquityPoint(
                 session=date.fromisoformat(row["date"]),
                 equity=float(row["equity"]),
-                synthetic_mega_cap_proxy_equity=float(
-                    row["synthetic_mega_cap_proxy_equity"]
-                ),
+                synthetic_mega_cap_proxy_equity=float(row[reference_column]),
                 equal_weight_equity=float(row["equal_weight_equity"]),
             )
-            for row in csv.DictReader(handle)
+            for row in reader
         ]
 
 

@@ -25,6 +25,8 @@ from retailtrader.domain import ExperimentManifest, FillEvent, PortfolioSnapshot
 from retailtrader.storage.events import to_jsonable
 
 EQUITY_HEADER = "date,equity,synthetic_mega_cap_proxy_equity,equal_weight_equity"
+SPY_EQUITY_HEADER = "date,equity,spy_equity,equal_weight_equity"
+SUPPORTED_EQUITY_HEADERS = frozenset({EQUITY_HEADER, SPY_EQUITY_HEADER})
 
 
 def portfolio_row(snapshot: PortfolioSnapshot) -> dict[str, Any]:
@@ -84,10 +86,18 @@ class RunWriter:
     def write_philosophy(self, yaml_text: str) -> None:
         self.path("philosophy.yaml").write_text(yaml_text, encoding="utf-8")
 
-    def initialize_materialized(self) -> None:
+    def write_data_provenance(self, provenance: dict[str, Any]) -> None:
+        self.path("data-provenance.json").write_text(
+            json.dumps(to_jsonable(provenance), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    def initialize_materialized(self, equity_header: str = EQUITY_HEADER) -> None:
+        if equity_header not in SUPPORTED_EQUITY_HEADERS:
+            raise ValueError(f"unsupported equity header: {equity_header}")
         for name in ("decisions.jsonl", "orders.jsonl", "fills.jsonl", "portfolio.jsonl"):
             self.path(name).write_text("", encoding="utf-8")
-        self.path("equity.csv").write_text(EQUITY_HEADER + "\n", encoding="utf-8")
+        self.path("equity.csv").write_text(equity_header + "\n", encoding="utf-8")
 
     def _append_jsonl(self, name: str, record: dict[str, Any]) -> None:
         with self.path(name).open("a", encoding="utf-8") as handle:

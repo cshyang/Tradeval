@@ -307,19 +307,51 @@ and a deterministic quality-value control.
 
 ### Delivery Order
 
-1. Rebase `feature/live-market-data` onto current `main` and reconcile its
-   runner, CLI, artifact, test, and frontend plan with the merged integrity work.
-2. Finish the point-in-time real-price gateway and explicit decision/execution
-   `SimulationFrame` contract in RetailTrader.
-3. Define `MandateSpec`, `AgentProtocol`, `CandidateSet`, `DecisionProposal`,
+1. **Completed in RetailTrader:** integrate the point-in-time adjusted-price
+   gateway, immutable cache, provenance, and explicit decision/execution
+   `SimulationFrame` contract without changing the frozen domain models.
+2. Define `MandateSpec`, `AgentProtocol`, `CandidateSet`, `DecisionProposal`,
    and `AuditEnvelope` contracts for AgentTrader.
-4. Implement one model-backed philosophy and proposal worker using fixtures for
+3. Implement one model-backed philosophy and proposal worker using fixtures for
    offline tests.
-5. Add experiment jobs and server-sent progress events.
-6. Build Describe -> Configure -> Preview -> Run in the unified UI.
-7. Reuse Equity Replay as the Watch/Explain result view.
-8. Add automatic forward scheduling after the hindsight workflow passes end to
+4. Add experiment jobs and server-sent progress events.
+5. Build Describe -> Configure -> Preview -> Run in the unified UI.
+6. Reuse Equity Replay as the Watch/Explain result view.
+7. Add automatic forward scheduling after the hindsight workflow passes end to
    end.
 
 Broad US symbol catalogs, multiple model providers, global assets, news, and
 fully point-in-time fundamental coverage remain later slices.
+
+## RetailTrader Phase Implementation Notes
+
+The RetailTrader-only phase uses completed adjusted daily bars from an explicit
+OpenBB/Yahoo route. Each normalized observation carries modeled 09:30 open and
+16:00 close availability in `America/New_York` before it crosses into the
+frozen domain contract. Daylight saving time is handled; exchange early-close
+timestamps are not. Treating 16:00 as availability on an early-close day is
+conservative rather than look-ahead.
+
+Signals are calculated from a completed decision session. Orders and fills are
+simulated at the next actual SPY-calendar session open and positions are marked
+at that session's close. Replay and restarted single-step execution use the
+same `simulation.runner.step` path. The append-only event stream is checked by
+ledger reconstruction, and event/materialized-artifact mismatches fail before
+any resume write.
+
+Yahoo bars use `splits_and_dividends` adjustment for both the strategy and its
+references. Dividends are not added separately. Adjusted OHLC fills are
+normalized research approximations rather than executable quote claims. Actual
+SPY and equal-weight outputs are no-cost, fractional fixed-basket references
+funded at the first execution open. The offline demo keeps its distinct
+**Synthetic mega-cap proxy** reference and never labels it SPY.
+
+Because the universe is the present-day fixed large-cap list, the real-price
+workflow is classified as `hindsight_current_universe`, even though bar access
+is time-gated. It must not be described as a cutoff-safe universe replay or a
+forward track record.
+
+This phase does not implement AgentTrader Lab model calls, agent proposals,
+research retrieval, or forward paper operation. Those remain companion-project
+work behind the repository boundary described above. RetailTrader continues to
+make every score, weight, simulated order, fill, cash, and position calculation.

@@ -83,11 +83,21 @@ def _apply_mark(state: LedgerState, as_of: str, payload: Mapping[str, Any]) -> N
         raise LedgerReplayError(
             f"marked cash {payload['cash']} diverges from ledger {state.cash}"
         )
-    prices = {row["symbol"]: Decimal(row["price"]) for row in payload["positions"]}
-    equity = state.cash + sum(
-        (Decimal(quantity) * prices[symbol] for symbol, quantity in state.positions.items()),
-        Decimal(0),
-    )
+    marked_values: dict[str, Decimal] = {}
+    for row in payload["positions"]:
+        symbol = row["symbol"]
+        price = Decimal(row["price"])
+        expected_value = (Decimal(row["quantity"]) * price).quantize(CENT)
+        marked_value = Decimal(row["value"])
+        if marked_value != expected_value:
+            raise LedgerReplayError(
+                f"marked value {marked_value} for {symbol} diverges from "
+                f"quantity-times-price {expected_value}"
+            )
+        marked_values[symbol] = marked_value
+    # The engine rounds each position to cents before summing portfolio equity.
+    # Repeating that exact path avoids a separate aggregate-rounding result.
+    equity = state.cash + sum(marked_values.values(), Decimal(0))
     state.equity = equity.quantize(CENT)
     if Decimal(payload["total_equity"]) != state.equity:
         raise LedgerReplayError(

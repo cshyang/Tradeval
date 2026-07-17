@@ -15,6 +15,7 @@ import hashlib
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from functools import lru_cache
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -168,7 +169,9 @@ def fundamentals(symbol: str, as_of: datetime) -> tuple[FundamentalObservation, 
 
 def snapshot_for(symbols: tuple[str, ...], session: date) -> MarketSnapshot:
     """Post-close snapshot for one session: that day's bars + eligible fundamentals."""
-    as_of = datetime.combine(session, time(20), tzinfo=UTC)
+    as_of = datetime.combine(
+        session, time(16), tzinfo=ZoneInfo("America/New_York")
+    ).astimezone(UTC)
     bars = []
     for symbol in symbols:
         day = [b for b in _price_series(symbol) if b.session == session]
@@ -188,16 +191,4 @@ def decision_snapshot_for(
     if not prior_sessions:
         raise ValueError(f"no completed session before {execution_session}")
     decision_session = prior_sessions[-1]
-    as_of = datetime.combine(decision_session, time(20), tzinfo=UTC)
-    bars = tuple(
-        bar
-        for symbol in symbols
-        for bar in _price_series(symbol)
-        if bar.session == decision_session
-    )
-    funds = tuple(
-        observation
-        for symbol in symbols
-        for observation in fundamentals(symbol, as_of)
-    )
-    return MarketSnapshot(as_of=as_of, bars=bars, fundamentals=funds)
+    return snapshot_for(symbols, decision_session)

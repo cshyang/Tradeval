@@ -11,11 +11,28 @@ export type Rejected = { symbol: string; reason: string; score: number | null };
 export type Rebalance = {
   week: number;
   as_of: string;
+  execution_as_of: string;
   relative_to_synthetic_mega_cap_proxy: number;
   selected: Selected[];
   rejected: Rejected[];
 };
 export type Metrics = Record<string, number | null>;
+export type DataProvenance = {
+  kind: "synthetic" | "real_market";
+  validity: string;
+  label: string;
+  transport: string;
+  provider: string;
+  provider_versions?: string[][];
+  adjustment: string;
+  retrieved_at?: string;
+  query_hash?: string;
+  normalized_hash?: string;
+  benchmark_kind: string;
+  reference_method_version: string;
+  execution_model_version: string;
+  warnings?: string[];
+};
 export type Experiment = {
   id: string;
   label: string;
@@ -30,6 +47,7 @@ export type Experiment = {
   /** The run's real philosophy.yaml, rendered verbatim in the spec modal. */
   spec_yaml: string;
   tagline: string;
+  data_provenance: DataProvenance;
   equity: string[];
   rebalances: Rebalance[];
   evaluation: { metrics: Metrics; fidelity: Metrics };
@@ -38,6 +56,7 @@ export type RunData = {
   dates: string[];
   synthetic_mega_cap_proxy: string[];
   equal_weight: string[];
+  data_provenance: DataProvenance;
   experiments: Experiment[];
   benchmarks: { synthetic_mega_cap_proxy: Metrics; equal_weight: Metrics };
 };

@@ -81,7 +81,7 @@ def test_decision_snapshot_cannot_see_execution_bar_or_late_fundamental(monkeypa
 
 def test_demo_target_generator_scores_the_prior_decision_snapshot(monkeypatch):
     execution_session = date(2026, 6, 15)
-    execution = snapshot_for(("AAPL",), execution_session)
+    decision_input = decision_snapshot_for(("AAPL",), execution_session)
     captured = {}
 
     def capture_target(spec, snapshot, run_id, *, history):
@@ -128,13 +128,14 @@ def test_demo_target_generator_scores_the_prior_decision_snapshot(monkeypatch):
         initial_cash=Decimal("100000.00"),
         slippage_bps=5,
     )
-    cli._make_generator(spec)(manifest, execution)
+    cli._make_generator(spec)(manifest, decision_input)
 
     decision = captured["snapshot"]
+    assert decision == decision_input
     assert decision.as_of.date() < execution_session
     assert all(bar.session < execution_session for bar in decision.bars)
     assert all(
-        bar.session < execution_session
+        bar.session <= decision.as_of.date()
         for history in captured["history"].values()
         for bar in history
     )

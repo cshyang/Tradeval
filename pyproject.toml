@@ -13,6 +13,12 @@ dependencies = [
     "rich>=13.7",
 ]
 
+[project.optional-dependencies]
+data-openbb = [
+    "openbb>=4.7.2,<5",
+    "openbb-yfinance>=1.6.3,<2",
+]
+
 [project.scripts]
 retailtrader = "retailtrader.cli:app"
 
@@ -28,6 +34,7 @@ packages = ["src/retailtrader"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["integration: opt-in tests that may access external services"]
 
 [tool.ruff]
 line-length = 100

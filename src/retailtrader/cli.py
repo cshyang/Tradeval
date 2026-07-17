@@ -8,8 +8,8 @@ import os
 import re
 import shutil
 import tempfile
-from collections.abc import Callable, Sequence
-from datetime import UTC, date, datetime, time
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
@@ -19,7 +19,24 @@ import typer
 import yaml
 
 from retailtrader.data import synthetic
+from retailtrader.data.cache import CachedDailyPriceSource, DailyPriceLoader, PriceCache
+from retailtrader.data.openbb import OpenBBYFinancePriceSource
+from retailtrader.data.protocol import (
+    PriceBatch,
+    PriceQuery,
+    canonical_json,
+    query_key,
+    validate_batch_identity,
+)
+from retailtrader.data.replay import (
+    REFERENCE_METHOD_VERSION,
+    build_price_frames,
+    build_reference_indices,
+    history_as_of,
+    market_open_utc,
+)
 from retailtrader.domain import (
+    ENGINE_VERSION,
     EvaluationReport,
     ExperimentManifest,
     MarketSnapshot,
@@ -36,15 +53,22 @@ from retailtrader.evaluation.report import (
     write_evaluation_json,
     write_report_md,
 )
+from retailtrader.factors import FUNDAMENTAL_FACTORS
 from retailtrader.philosophy import load_philosophy
 from retailtrader.scoring import generate_target
+from retailtrader.simulation.frame import SimulationFrame
 from retailtrader.simulation.ledger import replay_events
 from retailtrader.simulation.runner import (
     ExperimentRunner,
     ResumeMismatchError,
     remaining_session_suffix,
 )
-from retailtrader.storage.artifacts import read_jsonl, read_manifest
+from retailtrader.storage.artifacts import (
+    EQUITY_HEADER,
+    SPY_EQUITY_HEADER,
+    read_jsonl,
+    read_manifest,
+)
 from retailtrader.storage.events import to_jsonable
 
 app = typer.Typer(no_args_is_help=True, help="Deterministic trading philosophy lab.")
@@ -63,6 +87,14 @@ SLIPPAGE_BPS = 5
 DATA_SOURCE = "synthetic-v1"
 BENCHMARK_SOURCE = "synthetic-mega-cap-proxy-v1"
 SYNTHETIC_MEGA_CAP_PROXY = ("AAPL", "MSFT", "NVDA", "AMZN", "GOOGL")
+REAL_DATA_SOURCE = "openbb-yfinance-adjusted-v1"
+REAL_BENCHMARK_SOURCE = "spy-no-cost-reference-v1"
+BENCHMARK_SYMBOL = "SPY"
+WARMUP_DAYS = 400
+CALENDAR_BUFFER_DAYS = 7
+MIN_TREND_HISTORY = 253
+EXECUTION_MODEL_VERSION = "prior_close_next_open_v1"
+PROVENANCE_SCHEMA_VERSION = 1
 RUN_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
 EXPORT_ARTIFACTS = (
@@ -72,6 +104,7 @@ EXPORT_ARTIFACTS = (
     "decisions.jsonl",
     "portfolio.jsonl",
     "evaluation.json",
+    "data-provenance.json",
 )
 
 
@@ -169,10 +202,23 @@ def _snapshots(symbols: tuple[str, ...], sessions: Sequence[date]) -> list[Marke
     return [synthetic.snapshot_for(symbols, session) for session in sessions]
 
 
+def _frames(
+    symbols: tuple[str, ...], execution_sessions: Sequence[date]
+) -> list[SimulationFrame]:
+    return [
+        SimulationFrame(
+            decision=synthetic.decision_snapshot_for(symbols, session),
+            execution=synthetic.snapshot_for(symbols, session),
+            execution_at=market_open_utc(session),
+        )
+        for session in execution_sessions
+    ]
+
+
 def _benchmarks(
     snapshots: Sequence[MarketSnapshot], symbols: tuple[str, ...]
 ) -> dict[date, tuple[Decimal, Decimal]]:
-    first = {bar.symbol: bar.close for bar in snapshots[0].bars}
+    first = {bar.symbol: bar.open for bar in snapshots[0].bars}
 
     def index_value(snapshot: MarketSnapshot, members: tuple[str, ...]) -> Decimal:
         closes = {bar.symbol: bar.close for bar in snapshot.bars}
@@ -188,23 +234,27 @@ def _benchmarks(
     }
 
 
-def _make_generator(spec: PhilosophySpec):
-    def generate(manifest: ExperimentManifest, execution_snapshot: MarketSnapshot):
-        symbols = tuple(sorted(bar.symbol for bar in execution_snapshot.bars))
-        decision_snapshot = synthetic.decision_snapshot_for(
-            symbols, execution_snapshot.as_of.date()
+HistoryLookup = Callable[[MarketSnapshot], Mapping[str, tuple[Any, ...]]]
+
+
+def _make_generator(
+    spec: PhilosophySpec, history_lookup: HistoryLookup | None = None
+):
+    def generate(manifest: ExperimentManifest, decision_snapshot: MarketSnapshot):
+        symbols = tuple(sorted(bar.symbol for bar in decision_snapshot.bars))
+        history = (
+            {
+                symbol: synthetic.price_history(
+                    symbol, decision_snapshot.as_of + timedelta(days=1)
+                )
+                for symbol in symbols
+            }
+            if history_lookup is None
+            else history_lookup(decision_snapshot)
         )
-        history = {
-            symbol: synthetic.price_history(symbol, decision_snapshot.as_of)
-            for symbol in symbols
-        }
-        target, decisions = generate_target(
+        return generate_target(
             spec, decision_snapshot, manifest.run_id, history=history
         )
-        execution_as_of = execution_snapshot.as_of
-        target = target.model_copy(update={"as_of": execution_as_of})
-        decisions = [dict(record, as_of=execution_as_of.isoformat()) for record in decisions]
-        return target, decisions
 
     return generate
 
@@ -231,6 +281,45 @@ def _manifest(
     )
 
 
+def _identity_hash(payload: Mapping[str, Any]) -> str:
+    return hashlib.sha256(canonical_json(dict(payload)).encode("utf-8")).hexdigest()
+
+
+def _synthetic_provenance(manifest: ExperimentManifest) -> dict[str, Any]:
+    identity = {
+        "identity_version": 1,
+        "kind": "synthetic",
+        "validity": "synthetic_demo",
+        "start": manifest.start,
+        "end": manifest.end,
+        "philosophy_hash": manifest.philosophy_hash,
+        "universe_hash": manifest.universe_hash,
+        "engine_version": manifest.engine_version,
+        "initial_cash": str(manifest.initial_cash),
+        "slippage_bps": manifest.slippage_bps,
+        "execution_model_version": EXECUTION_MODEL_VERSION,
+        "reference_method_version": REFERENCE_METHOD_VERSION,
+    }
+    return {
+        "schema_version": PROVENANCE_SCHEMA_VERSION,
+        "kind": "synthetic",
+        "validity": "synthetic_demo",
+        "label": "SYNTHETIC DEMO DATA",
+        "transport": "generated",
+        "provider": "synthetic",
+        "provider_versions": [],
+        "adjustment": "none",
+        "benchmark_kind": "no_cost_reference",
+        "reference_method_version": REFERENCE_METHOD_VERSION,
+        "execution_model_version": EXECUTION_MODEL_VERSION,
+        "run_identity_hash": _identity_hash(identity),
+        "warnings": [
+            "Generated deterministic prices and fundamentals; not observed market data.",
+            "The Synthetic mega-cap proxy is not SPY.",
+        ],
+    }
+
+
 def _run_dir(workspace: Path, run_id: str) -> Path:
     return workspace / _validate_run_id(run_id)
 
@@ -253,14 +342,15 @@ def _create_experiment(
         run_id=run_id, spec=spec, start=start, end=end, universe_hash=universe_hash
     )
     sessions = _scheduled_sessions(manifest.start, manifest.end, manifest.cadence)
-    snapshots = _snapshots(symbols, sessions)
+    frames = _frames(symbols, sessions)
     ExperimentRunner(
         experiment=manifest,
         run_dir=run_dir,
         generate_target=_make_generator(spec),
-        benchmarks=_benchmarks(snapshots, symbols),
+        benchmarks=_benchmarks([frame.execution for frame in frames], symbols),
         philosophy_yaml=philosophy_path.read_text(encoding="utf-8"),
         max_turnover=spec.max_turnover,
+        data_provenance=_synthetic_provenance(manifest),
     )
     return {
         "run_id": run_id,
@@ -289,8 +379,8 @@ def _load_context(workspace: Path, run_id: str):
     if expected != actual:
         raise CliError("run_identity_mismatch", "manifest inputs do not match artifacts", 5)
     sessions = _scheduled_sessions(manifest.start, manifest.end, manifest.cadence)
-    snapshots = _snapshots(symbols, sessions)
-    benchmarks = _benchmarks(snapshots, symbols)
+    frames = _frames(symbols, sessions)
+    benchmarks = _benchmarks([frame.execution for frame in frames], symbols)
     runner = ExperimentRunner(
         experiment=manifest,
         run_dir=run_dir,
@@ -298,22 +388,23 @@ def _load_context(workspace: Path, run_id: str):
         benchmarks=benchmarks,
         philosophy_yaml=(run_dir / "philosophy.yaml").read_text(encoding="utf-8"),
         max_turnover=spec.max_turnover,
+        data_provenance=_synthetic_provenance(manifest),
     )
-    return run_dir, manifest, spec, sessions, snapshots, runner
+    return run_dir, manifest, spec, sessions, frames, runner
 
 
 def _completed_dates(runner: ExperimentRunner) -> tuple[date, ...]:
     return tuple(
-        datetime.fromisoformat(value).date()
+        date.fromisoformat(value)
         for value in sorted(runner.event_log.completed_sessions())
     )
 
 
 def _replay_experiment(workspace: Path, run_id: str) -> dict[str, Any]:
-    _, manifest, _, sessions, snapshots, runner = _load_context(workspace, run_id)
+    _, manifest, _, sessions, frames, runner = _load_context(workspace, run_id)
     completed = _completed_dates(runner)
     remaining = remaining_session_suffix(completed, sessions)
-    final = runner.replay(snapshots)
+    final = runner.replay(frames)
     replay_events(runner.event_log.read())
     return {
         "run_id": run_id,
@@ -330,7 +421,7 @@ def _replay_experiment(workspace: Path, run_id: str) -> dict[str, Any]:
 
 
 def _paper_step(workspace: Path, run_id: str, session: date) -> dict[str, Any]:
-    _, manifest, _, sessions, snapshots, runner = _load_context(workspace, run_id)
+    _, manifest, _, sessions, frames, runner = _load_context(workspace, run_id)
     completed = _completed_dates(runner)
     if session in completed:
         return {
@@ -345,8 +436,8 @@ def _paper_step(workspace: Path, run_id: str, session: date) -> dict[str, Any]:
     if not remaining or session != remaining[0]:
         expected = remaining[0] if remaining else "none"
         raise CliError("out_of_order_session", f"expected next session {expected}", 5)
-    snapshot = next(item for item in snapshots if item.as_of.date() == session)
-    final = runner.step(snapshot)
+    frame = next(item for item in frames if item.execution_session == session)
+    final = runner.step(frame)
     replay_events(runner.event_log.read())
     return {
         "run_id": run_id,
@@ -375,7 +466,12 @@ def _evaluate_run(run_dir: Path, manifest: ExperimentManifest) -> EvaluationRepo
         ),
     )
     write_evaluation_json(report, run_dir / "evaluation.json")
-    write_report_md(manifest, report, run_dir / "report.md")
+    provenance = json.loads(
+        (run_dir / "data-provenance.json").read_text(encoding="utf-8")
+    )
+    write_report_md(
+        manifest, report, run_dir / "report.md", data_provenance=provenance
+    )
     return report
 
 
@@ -487,6 +583,170 @@ def _display_rejected(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _validate_export_provenance(
+    run_dir: Path,
+    manifest: ExperimentManifest,
+    symbols: tuple[str, ...],
+) -> dict[str, Any]:
+    path = run_dir / "data-provenance.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise CliError(
+            "run_identity_mismatch", f"invalid provenance for {run_dir.name}: {exc}", 5
+        ) from exc
+    if not isinstance(payload, dict):
+        raise CliError(
+            "run_identity_mismatch",
+            f"invalid provenance for {run_dir.name}: expected an object",
+            5,
+        )
+    equity_header = (run_dir / "equity.csv").read_text(encoding="utf-8").splitlines()[0]
+
+    if payload.get("kind") == "synthetic":
+        expected = to_jsonable(_synthetic_provenance(manifest))
+        if (
+            manifest.data_source != DATA_SOURCE
+            or manifest.benchmark_source != BENCHMARK_SOURCE
+            or equity_header != EQUITY_HEADER
+            or payload != expected
+        ):
+            raise CliError(
+                "run_identity_mismatch",
+                f"synthetic provenance disagrees with {run_dir.name} artifacts",
+                5,
+            )
+        return payload
+
+    if payload.get("kind") != "real_market":
+        raise CliError(
+            "run_identity_mismatch",
+            f"unsupported provenance kind for {run_dir.name}",
+            5,
+        )
+    identity = payload.get("run_identity")
+    query_payload = payload.get("query")
+    if not isinstance(identity, dict) or not isinstance(query_payload, dict):
+        raise CliError(
+            "run_identity_mismatch",
+            f"real-market provenance is incomplete for {run_dir.name}",
+            5,
+        )
+    try:
+        requested_start = date.fromisoformat(identity["requested_start"])
+        requested_end = date.fromisoformat(identity["requested_end"])
+        query = PriceQuery(
+            tuple(query_payload["symbols"]),
+            date.fromisoformat(query_payload["start"]),
+            date.fromisoformat(query_payload["end"]),
+            interval=query_payload["interval"],
+            adjustment=query_payload["adjustment"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CliError(
+            "run_identity_mismatch",
+            f"invalid real-market provenance for {run_dir.name}: {exc}",
+            5,
+        ) from exc
+
+    identity_hash = _identity_hash(identity)
+    expected_identity = {
+        "identity_version": 1,
+        "actual_start": manifest.start.isoformat(),
+        "actual_end": manifest.end.isoformat(),
+        "transport": payload.get("transport"),
+        "provider": payload.get("provider"),
+        "provider_versions": payload.get("provider_versions"),
+        "adjustment": payload.get("adjustment"),
+        "query_hash": payload.get("query_hash"),
+        "normalized_hash": payload.get("normalized_hash"),
+        "philosophy_hash": manifest.philosophy_hash,
+        "universe_hash": manifest.universe_hash,
+        "engine_version": manifest.engine_version,
+        "initial_cash": str(manifest.initial_cash),
+        "slippage_bps": manifest.slippage_bps,
+        "execution_model_version": EXECUTION_MODEL_VERSION,
+        "reference_method_version": REFERENCE_METHOD_VERSION,
+    }
+    expected_run_id = (
+        f"exp-{manifest.philosophy_name}-{manifest.philosophy_version}-market-"
+        f"{identity_hash[:16]}"
+    )
+    mismatched_identity = any(identity.get(key) != value for key, value in expected_identity.items())
+    if (
+        manifest.data_source != REAL_DATA_SOURCE
+        or manifest.benchmark_source != REAL_BENCHMARK_SOURCE
+        or equity_header != SPY_EQUITY_HEADER
+        or payload.get("schema_version") != PROVENANCE_SCHEMA_VERSION
+        or payload.get("validity") != "hindsight_current_universe"
+        or payload.get("label") != "HINDSIGHT · ADJUSTED MARKET DATA"
+        or payload.get("transport") != "openbb"
+        or payload.get("provider") != "yfinance"
+        or payload.get("adjustment") != "splits_and_dividends"
+        or payload.get("benchmark_kind") != "no_cost_reference"
+        or payload.get("execution_model_version") != EXECUTION_MODEL_VERSION
+        or payload.get("reference_method_version") != REFERENCE_METHOD_VERSION
+        or payload.get("run_identity_hash") != identity_hash
+        or manifest.run_id != expected_run_id
+        or manifest.id != expected_run_id
+        or mismatched_identity
+        or query.symbols != tuple(sorted((*symbols, BENCHMARK_SYMBOL)))
+        or query.start != requested_start - timedelta(days=WARMUP_DAYS)
+        or query.end != requested_end + timedelta(days=CALENDAR_BUFFER_DAYS)
+        or query_key("openbb", "yfinance", query) != payload.get("query_hash")
+    ):
+        raise CliError(
+            "run_identity_mismatch",
+            f"real-market provenance disagrees with {run_dir.name} artifacts",
+            5,
+        )
+    return payload
+
+
+_PUBLIC_PROVENANCE_FIELDS = (
+    "kind",
+    "validity",
+    "label",
+    "transport",
+    "provider",
+    "provider_versions",
+    "adjustment",
+    "retrieved_at",
+    "query_hash",
+    "normalized_hash",
+    "benchmark_kind",
+    "reference_method_version",
+    "execution_model_version",
+    "warnings",
+)
+
+
+def _public_provenance(run_dir: Path) -> dict[str, Any]:
+    path = run_dir / "data-provenance.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} must contain an object")
+    required = {
+        "kind",
+        "validity",
+        "label",
+        "transport",
+        "provider",
+        "adjustment",
+        "benchmark_kind",
+        "reference_method_version",
+        "execution_model_version",
+    }
+    missing = sorted(required - set(payload))
+    if missing:
+        raise ValueError(f"{path} missing provenance fields: {missing}")
+    return {
+        key: payload[key]
+        for key in _PUBLIC_PROVENANCE_FIELDS
+        if key in payload
+    }
+
+
 def _view_model(runs: list[tuple[dict[str, Any], Path]]) -> dict[str, Any]:
     universe_name, _, _ = _universe()
     _, first_dir = runs[0]
@@ -494,22 +754,24 @@ def _view_model(runs: list[tuple[dict[str, Any], Path]]) -> dict[str, Any]:
     dates = [point.session.isoformat() for point in equity_points]
     proxy = [f"{point.synthetic_mega_cap_proxy_equity:.2f}" for point in equity_points]
     equal_weight = [f"{point.equal_weight_equity:.2f}" for point in equity_points]
-    week_of = {session: index for index, session in enumerate(dates)}
     experiments = []
 
     for manifest, run_dir in runs:
         points = read_equity_csv(run_dir / "equity.csv")
         evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
         rebalances = []
-        for record in read_jsonl(run_dir / "decisions.jsonl"):
-            session = record["as_of"][:10]
-            if session not in week_of:
-                raise ValueError(f"decision session missing from equity axis: {session}")
-            week = week_of[session]
+        decisions = read_jsonl(run_dir / "decisions.jsonl")
+        if len(decisions) != len(points):
+            raise ValueError("decision and equity axes have different lengths")
+        provenance = _public_provenance(run_dir)
+        for week, record in enumerate(decisions):
+            decision_session = record["as_of"][:10]
+            execution_session = dates[week]
             rebalances.append(
                 {
                     "week": week,
-                    "as_of": session,
+                    "as_of": decision_session,
+                    "execution_as_of": execution_session,
                     "relative_to_synthetic_mega_cap_proxy": round(
                         points[week].equity
                         / equity_points[week].synthetic_mega_cap_proxy_equity
@@ -545,6 +807,7 @@ def _view_model(runs: list[tuple[dict[str, Any], Path]]) -> dict[str, Any]:
                     "metrics": evaluation["metrics"],
                     "fidelity": evaluation["fidelity"],
                 },
+                "data_provenance": provenance,
             }
         )
 
@@ -554,6 +817,7 @@ def _view_model(runs: list[tuple[dict[str, Any], Path]]) -> dict[str, Any]:
     return {
         "dates": dates,
         "synthetic_mega_cap_proxy": proxy,
+        "data_provenance": _public_provenance(first_dir),
         "equal_weight": equal_weight,
         "experiments": experiments,
         "benchmarks": {
@@ -575,6 +839,7 @@ def _view_model(runs: list[tuple[dict[str, Any], Path]]) -> dict[str, Any]:
 
 def _validated_export_runs(workspace: Path) -> list[tuple[dict[str, Any], Path]]:
     runs = []
+    universe_name, symbols, universe_hash = _universe()
     for manifest_path in sorted(workspace.glob("*/manifest.json")):
         run_dir = manifest_path.parent
         missing = [name for name in EXPORT_ARTIFACTS if not (run_dir / name).is_file()]
@@ -583,7 +848,28 @@ def _validated_export_runs(workspace: Path) -> list[tuple[dict[str, Any], Path]]
         manifest_model = read_manifest(manifest_path)
         if manifest_model.id != run_dir.name or manifest_model.run_id != run_dir.name:
             raise CliError("run_identity_mismatch", f"invalid run directory: {run_dir}", 3)
-        load_philosophy(run_dir / "philosophy.yaml")
+        spec = load_philosophy(run_dir / "philosophy.yaml")
+        expected_identity = (
+            spec.name,
+            spec.version,
+            spec.content_hash,
+            spec.universe,
+            universe_hash,
+        )
+        manifest_identity = (
+            manifest_model.philosophy_name,
+            manifest_model.philosophy_version,
+            manifest_model.philosophy_hash,
+            universe_name,
+            manifest_model.universe_hash,
+        )
+        if expected_identity != manifest_identity:
+            raise CliError(
+                "run_identity_mismatch",
+                f"manifest inputs do not match {run_dir.name} artifacts",
+                5,
+            )
+        _validate_export_provenance(run_dir, manifest_model, symbols)
         points = read_equity_csv(run_dir / "equity.csv")
         if len(points) < 3:
             raise CliError("incomplete_run", f"{run_dir.name} has insufficient equity", 4)
@@ -684,6 +970,171 @@ def _export_workspace(workspace: Path, out: Path) -> dict[str, Any]:
     }
 
 
+def _require_price_only(spec: PhilosophySpec) -> None:
+    metrics = {factor.name for factor in spec.factors} | {
+        filter_.metric for filter_ in spec.filters
+    }
+    unsupported = sorted(metrics & set(FUNDAMENTAL_FACTORS))
+    if unsupported:
+        raise ValueError(
+            "real-price v1 supports price factors only; fundamental factors found: "
+            + ", ".join(unsupported)
+        )
+
+
+def _market_provenance(
+    *, batch: PriceBatch, identity: Mapping[str, Any]
+) -> dict[str, Any]:
+    return {
+        "schema_version": PROVENANCE_SCHEMA_VERSION,
+        "kind": "real_market",
+        "validity": "hindsight_current_universe",
+        "label": "HINDSIGHT · ADJUSTED MARKET DATA",
+        "transport": batch.transport,
+        "provider": batch.provider,
+        "provider_versions": [list(item) for item in batch.provider_versions],
+        "adjustment": batch.query.adjustment,
+        "retrieved_at": batch.retrieved_at,
+        "query": {
+            "symbols": list(batch.query.symbols),
+            "start": batch.query.start,
+            "end": batch.query.end,
+            "interval": batch.query.interval,
+            "adjustment": batch.query.adjustment,
+        },
+        "query_hash": query_key(batch.transport, batch.provider, batch.query),
+        "raw_hash": batch.raw_hash,
+        "normalized_hash": batch.normalized_hash,
+        "source_refs": sorted(
+            {observation.source_ref for observation in batch.observations}
+        ),
+        "benchmark_kind": "no_cost_reference",
+        "reference_method_version": REFERENCE_METHOD_VERSION,
+        "execution_model_version": EXECUTION_MODEL_VERSION,
+        "run_identity": dict(identity),
+        "run_identity_hash": _identity_hash(identity),
+        "warnings": [
+            "The fixed present-day large-cap universe introduces survivorship bias.",
+            "Adjusted OHLC fills are normalized research prices, not observed executable quotes.",
+            "SPY and equal-weight series are no-cost fractional reference indices.",
+            "Yahoo Finance is an unofficial upstream with no availability SLA.",
+        ],
+    }
+
+
+def _run_market_replay(
+    *,
+    loader: DailyPriceLoader,
+    workspace: Path,
+    start: date,
+    end: date,
+) -> Path:
+    """Run one fake-money trend replay from a validated daily-price loader."""
+    if start >= end:
+        raise ValueError("market replay start must precede end")
+    _, symbols, universe_hash = _universe()
+    spec_path = PHILOSOPHY_DIR / "trend-v1.yaml"
+    spec = load_philosophy(spec_path)
+    _require_price_only(spec)
+    query = PriceQuery(
+        (*symbols, BENCHMARK_SYMBOL),
+        start - timedelta(days=WARMUP_DAYS),
+        end + timedelta(days=CALENDAR_BUFFER_DAYS),
+    )
+    fetch = loader.fetch(query)
+    batch = fetch.batch
+    validate_batch_identity(
+        batch,
+        transport=getattr(loader, "transport", batch.transport),
+        provider=getattr(loader, "provider", batch.provider),
+        query=query,
+    )
+    frames = list(build_price_frames(batch, symbols, start, end, BENCHMARK_SYMBOL))
+    if len(frames) < 3:
+        raise ValueError(
+            f"evaluation requires at least 3 real-price frames; got {len(frames)}"
+        )
+    first_history = history_as_of(batch, symbols, frames[0].decision.as_of)
+    insufficient = sorted(
+        symbol
+        for symbol in symbols
+        if len(first_history.get(symbol, ())) < MIN_TREND_HISTORY
+    )
+    if insufficient:
+        raise ValueError(
+            f"need {MIN_TREND_HISTORY} completed sessions before the first decision for: "
+            + ", ".join(insufficient)
+        )
+
+    references = build_reference_indices(
+        frames, batch, symbols, INITIAL_CASH, BENCHMARK_SYMBOL
+    )
+    identity = {
+        "identity_version": 1,
+        "requested_start": start,
+        "requested_end": end,
+        "actual_start": frames[0].decision.as_of.date(),
+        "actual_end": frames[-1].execution.as_of.date(),
+        "transport": batch.transport,
+        "provider": batch.provider,
+        "provider_versions": batch.provider_versions,
+        "adjustment": batch.query.adjustment,
+        "query_hash": query_key(batch.transport, batch.provider, batch.query),
+        "normalized_hash": batch.normalized_hash,
+        "philosophy_hash": spec.content_hash or "",
+        "universe_hash": universe_hash,
+        "engine_version": ENGINE_VERSION,
+        "initial_cash": str(INITIAL_CASH),
+        "slippage_bps": SLIPPAGE_BPS,
+        "execution_model_version": EXECUTION_MODEL_VERSION,
+        "reference_method_version": REFERENCE_METHOD_VERSION,
+    }
+    identity_hash = _identity_hash(identity)
+    run_id = f"exp-{spec.name}-{spec.version}-market-{identity_hash[:16]}"
+    run_dir = workspace / run_id
+    manifest_path = run_dir / "manifest.json"
+    created_at = (
+        read_manifest(manifest_path).created_at
+        if manifest_path.is_file()
+        else datetime.now(UTC)
+    )
+    manifest = ExperimentManifest(
+        id=run_id,
+        run_id=run_id,
+        philosophy_name=spec.name,
+        philosophy_version=spec.version,
+        philosophy_hash=spec.content_hash or "",
+        universe_hash=universe_hash,
+        cadence=spec.cadence,
+        start=frames[0].decision.as_of.date(),
+        end=frames[-1].execution.as_of.date(),
+        created_at=created_at,
+        data_source=REAL_DATA_SOURCE,
+        benchmark_source=REAL_BENCHMARK_SOURCE,
+        initial_cash=INITIAL_CASH,
+        slippage_bps=SLIPPAGE_BPS,
+    )
+    provenance = _market_provenance(batch=batch, identity=identity)
+
+    def market_history(snapshot: MarketSnapshot):
+        return history_as_of(batch, symbols, snapshot.as_of)
+
+    runner = ExperimentRunner(
+        experiment=manifest,
+        run_dir=run_dir,
+        generate_target=_make_generator(spec, market_history),
+        benchmarks=references,
+        philosophy_yaml=spec_path.read_text(encoding="utf-8"),
+        max_turnover=spec.max_turnover,
+        data_provenance=provenance,
+        reference_column="spy_equity",
+    )
+    runner.replay(frames)
+    report = _evaluate_run(run_dir, manifest)
+    write_comparison_md([(manifest, report)], workspace / "comparison.md")
+    return run_dir
+
+
 @philosophy_app.command("validate")
 def philosophy_validate(
     path: Path,
@@ -772,6 +1223,39 @@ def experiment_compare(
         output_format,
         lambda: _compare_experiments(workspace, run_id),
     )
+
+
+@app.command("market-replay")
+def market_replay(
+    start: datetime = typer.Option(..., help="First execution date (YYYY-MM-DD)."),
+    end: datetime = typer.Option(..., help="Last execution date (YYYY-MM-DD)."),
+    workspace: Path = typer.Option(Path("runs/market"), help="Run output directory."),
+    cache: Path = typer.Option(Path("data/cache"), help="Immutable price cache."),
+    output_format: OutputFormat = typer.Option(OutputFormat.text, "--format"),
+) -> None:
+    """Replay the trend philosophy on adjusted market data and fake cash."""
+
+    def action() -> dict[str, Any]:
+        run_dir = _run_market_replay(
+            loader=CachedDailyPriceSource(
+                OpenBBYFinancePriceSource(), PriceCache(cache)
+            ),
+            workspace=workspace,
+            start=start.date(),
+            end=end.date(),
+        )
+        portfolio = read_jsonl(run_dir / "portfolio.jsonl")[-1]
+        return {
+            "run_id": run_dir.name,
+            "run_dir": str(run_dir),
+            "final_equity": portfolio["total_equity"],
+            "validity": "hindsight_current_universe",
+            "message": (
+                f"done: final equity {portfolio['total_equity']} | run {run_dir}"
+            ),
+        }
+
+    _execute("market-replay", output_format, action)
 
 
 @app.command()

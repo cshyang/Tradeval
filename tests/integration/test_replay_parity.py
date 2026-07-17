@@ -4,7 +4,7 @@ ledger reconstruction, and artifact shapes matching tests/fixtures/demo-run."""
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -21,7 +21,7 @@ from retailtrader.simulation.runner import (
 )
 from retailtrader.storage.artifacts import read_jsonl
 from retailtrader.storage.events import EventLog
-from tests.helpers import make_experiment, make_snapshot, stub_generator
+from tests.helpers import make_experiment, make_frame, stub_generator
 
 FIXTURE_RUN = Path(__file__).parents[2] / "tests/fixtures/demo-run/exp-trend-v1-2024"
 PHILOSOPHY_YAML = "name: stub\nversion: v1\n"
@@ -64,7 +64,15 @@ ARTIFACTS = [
 
 
 def snapshots() -> list:
-    return [make_snapshot(session, PRICES[session]) for session in SESSIONS]
+    return [
+        make_frame(
+            session - timedelta(days=3),
+            session,
+            PRICES[session],
+            PRICES[session],
+        )
+        for session in SESSIONS
+    ]
 
 
 def make_runner(
@@ -73,6 +81,7 @@ def make_runner(
     experiment: ExperimentManifest | None = None,
     philosophy_yaml: str = PHILOSOPHY_YAML,
     max_turnover: float | None = 0.10,
+    data_provenance: dict[str, object] | None = None,
 ) -> ExperimentRunner:
     return ExperimentRunner(
         experiment=experiment or make_experiment(),
@@ -81,6 +90,7 @@ def make_runner(
         benchmarks=BENCHMARKS,
         philosophy_yaml=philosophy_yaml,
         max_turnover=max_turnover,
+        data_provenance=data_provenance,
     )
 
 
@@ -249,6 +259,20 @@ def test_resume_accepts_changed_created_at_and_adopts_persisted_manifest(tmp_pat
     assert artifact_bytes(tmp_path) == before
 
 
+def test_resume_rejects_changed_provenance_without_writes(tmp_path: Path) -> None:
+    provenance = {"kind": "synthetic", "normalized_hash": "a" * 64}
+    make_runner(tmp_path, data_provenance=provenance).step(snapshots()[0])
+    before = artifact_bytes(tmp_path)
+
+    with pytest.raises(ResumeMismatchError, match="data-provenance.json mismatch"):
+        make_runner(
+            tmp_path,
+            data_provenance=provenance | {"normalized_hash": "b" * 64},
+        )
+
+    assert artifact_bytes(tmp_path) == before
+
+
 def test_resume_rejects_changed_philosophy_text_without_writes(tmp_path: Path) -> None:
     make_runner(tmp_path).step(snapshots()[0])
     before = artifact_bytes(tmp_path)
@@ -304,6 +328,23 @@ def test_resume_rejects_mixed_event_run_ids_without_writes(tmp_path: Path) -> No
         make_runner(tmp_path)
 
     assert artifact_bytes(tmp_path) == before
+
+
+def test_resume_reconstructs_ledger_before_accepting_coherent_projections(
+    tmp_path: Path,
+) -> None:
+    make_runner(tmp_path).step(snapshots()[0])
+    events_path = tmp_path / "events.jsonl"
+    events = read_jsonl(events_path)
+    fill_event = next(event for event in events if event["event_type"] == "order_filled")
+    fill_event["payload"]["quantity"] += 1
+    events_path.write_text("".join(json.dumps(event) + "\n" for event in events))
+    fills_path = tmp_path / "fills.jsonl"
+    fills = read_jsonl(fills_path)
+    fills[0]["quantity"] += 1
+    fills_path.write_text("".join(json.dumps(fill) + "\n" for fill in fills))
+
+    assert_resume_rejected_without_writes(tmp_path, "ledger reconstruction failed")
 
 
 def test_resume_rejects_mixed_event_schema_versions_without_writes(tmp_path: Path) -> None:
@@ -378,7 +419,7 @@ def test_resume_rejects_portfolio_mark_without_terminal_event_or_duplicate_rows(
 def test_resume_rejects_transition_events_after_last_completed_session(tmp_path: Path) -> None:
     runner = make_runner(tmp_path)
     runner.step(snapshots()[0])
-    next_snapshot = snapshots()[1]
+    next_snapshot = snapshots()[1].decision
     runner.event_log.append(
         "target_generated",
         next_snapshot.as_of,
