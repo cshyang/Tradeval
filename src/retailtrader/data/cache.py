@@ -175,6 +175,10 @@ class PriceCache:
         entry = self.entry_path(transport, provider, query)
         if not entry.exists():
             return None
+        # A prior process may have crashed after publishing the complete entry
+        # but before syncing the parent directory. Make the visible entry durable
+        # before treating it as a cache hit.
+        _fsync_directory(entry.parent)
         return self._load_entry(entry, transport, provider, query)
 
     def _load_entry(

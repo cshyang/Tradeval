@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+import retailtrader.data.cache as cache_module
 from retailtrader.data.cache import (
     CachedDailyPriceSource,
     PriceCache,
@@ -167,7 +168,9 @@ def test_failed_prepublication_write_cleans_temporary_directory(tmp_path: Path) 
     assert list(parent.glob(".*")) == []
 
 
-def test_postpublication_failure_recovers_complete_entry(tmp_path: Path) -> None:
+def test_postpublication_failure_recovers_complete_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def fail(point: str) -> None:
         if point == "after_publish":
             raise OSError("injected")
@@ -176,7 +179,16 @@ def test_postpublication_failure_recovers_complete_entry(tmp_path: Path) -> None
     with pytest.raises(OSError, match="injected"):
         cache.store(_batch())
 
+    synced: list[Path] = []
+    real_fsync_directory = cache_module._fsync_directory
+
+    def record_fsync(path: Path) -> None:
+        synced.append(path)
+        real_fsync_directory(path)
+
+    monkeypatch.setattr(cache_module, "_fsync_directory", record_fsync)
     assert PriceCache(tmp_path).load("openbb", "yfinance", QUERY) == _batch()
+    assert cache.entry_path("openbb", "yfinance", QUERY).parent in synced
 
 
 def test_concurrent_identical_writers_are_idempotent(tmp_path: Path) -> None:
