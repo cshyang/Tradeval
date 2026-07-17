@@ -7,6 +7,11 @@ from retailtrader.data.cache import (
     PriceCacheIntegrityError,
     PriceFetchResult,
 )
+from retailtrader.data.openbb import (
+    OpenBBDataError,
+    OpenBBUnavailableError,
+    OpenBBYFinancePriceSource,
+)
 from retailtrader.data.protocol import (
     AvailableMarketBar,
     DailyPriceSource,
@@ -24,6 +29,9 @@ __all__ = [
     "CachedDailyPriceSource",
     "DailyPriceLoader",
     "DailyPriceSource",
+    "OpenBBDataError",
+    "OpenBBUnavailableError",
+    "OpenBBYFinancePriceSource",
     "PriceBatch",
     "PriceCache",
     "PriceCacheIntegrityError",
