@@ -92,10 +92,23 @@ class RunWriter:
     def write_philosophy(self, yaml_text: str) -> None:
         self._write_durable("philosophy.yaml", yaml_text.encode())
 
-    def validate_run_metadata(self, manifest: ExperimentManifest, philosophy_yaml: str) -> None:
+    def write_data_provenance(self, provenance: Mapping[str, Any]) -> None:
+        payload = to_jsonable(dict(provenance))
+        self._write_durable(
+            "data-provenance.json",
+            (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(),
+        )
+
+    def validate_run_metadata(
+        self,
+        manifest: ExperimentManifest,
+        philosophy_yaml: str,
+        data_provenance: Mapping[str, Any] | None = None,
+    ) -> None:
         """Validate existing immutable run files without healing missing files."""
         manifest_path = self.path("manifest.json")
         philosophy_path = self.path("philosophy.yaml")
+        provenance_path = self.path("data-provenance.json")
         if manifest_path.exists():
             try:
                 existing_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -118,13 +131,31 @@ class RunWriter:
                 raise TransitionIntegrityError("invalid philosophy.yaml") from exc
             if existing_philosophy != philosophy_yaml.encode():
                 raise TransitionIntegrityError("immutable philosophy.yaml mismatch")
+        if provenance_path.exists():
+            if data_provenance is None:
+                raise TransitionIntegrityError("unexpected immutable data provenance")
+            try:
+                existing_provenance = json.loads(
+                    provenance_path.read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise TransitionIntegrityError("invalid data-provenance.json") from exc
+            if existing_provenance != to_jsonable(dict(data_provenance)):
+                raise TransitionIntegrityError("immutable data provenance mismatch")
 
-    def heal_run_metadata(self, manifest: ExperimentManifest, philosophy_yaml: str) -> None:
+    def heal_run_metadata(
+        self,
+        manifest: ExperimentManifest,
+        philosophy_yaml: str,
+        data_provenance: Mapping[str, Any] | None = None,
+    ) -> None:
         """Atomically create files known to be missing after validation."""
         if not self.path("manifest.json").exists():
             self.write_manifest(manifest)
         if not self.path("philosophy.yaml").exists():
             self.write_philosophy(philosophy_yaml)
+        if data_provenance is not None and not self.path("data-provenance.json").exists():
+            self.write_data_provenance(data_provenance)
         # Existing entries may themselves be visible from an interrupted write.
         self._fsync_run_directory()
 

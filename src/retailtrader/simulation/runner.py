@@ -336,6 +336,7 @@ class ExperimentRunner:
         initial_cash: Decimal,
         slippage_bps: int = 0,
         failure_hook: FailureHook | None = None,
+        data_provenance: Mapping[str, Any] | None = None,
     ) -> None:
         self.experiment = experiment
         self.generate_target = generate_target
@@ -365,7 +366,9 @@ class ExperimentRunner:
                 "created_as_of": requested_created_as_of,
             }
             metadata = self.transition_store.validate_metadata(**metadata_arguments)
-            self.writer.validate_run_metadata(experiment, philosophy_yaml)
+            self.writer.validate_run_metadata(
+                experiment, philosophy_yaml, data_provenance
+            )
 
             event_run_id = metadata["run_id"] if metadata else experiment.run_id
             created_as_of = (
@@ -387,7 +390,9 @@ class ExperimentRunner:
 
             if metadata is None:
                 self.transition_store.initialize_metadata(**metadata_arguments)
-            self.writer.heal_run_metadata(experiment, philosophy_yaml)
+            self.writer.heal_run_metadata(
+                experiment, philosophy_yaml, data_provenance
+            )
             _materialize(
                 self.event_log,
                 self.writer,

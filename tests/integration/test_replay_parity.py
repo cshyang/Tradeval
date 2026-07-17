@@ -80,7 +80,9 @@ def frames() -> list:
 
 
 def make_runner(
-    run_dir: Path, failure_hook: Callable[[str], None] | None = None
+    run_dir: Path,
+    failure_hook: Callable[[str], None] | None = None,
+    data_provenance: dict | None = None,
 ) -> ExperimentRunner:
     return ExperimentRunner(
         experiment=make_experiment(),
@@ -91,6 +93,7 @@ def make_runner(
         initial_cash=Decimal("100000.00"),
         slippage_bps=10,
         failure_hook=failure_hook,
+        data_provenance=data_provenance,
     )
 
 
@@ -896,3 +899,31 @@ def test_end_to_end_evaluation_from_replayed_artifacts(tmp_path: Path) -> None:
     # The stub rotates between two overlapping picks each week.
     assert 0 < report.fidelity.selection_stability < 1
     assert report.metrics.trade_count > 0
+
+
+def test_immutable_data_provenance_rejects_incompatible_resume(
+    tmp_path: Path,
+) -> None:
+    first = {
+        "kind": "synthetic",
+        "normalized_hash": "a" * 64,
+    }
+    make_runner(tmp_path, data_provenance=first).replay(frames())
+    before = {
+        path.name: path.read_bytes()
+        for path in tmp_path.iterdir()
+        if path.is_file()
+    }
+
+    with pytest.raises(TransitionIntegrityError, match="data provenance mismatch"):
+        make_runner(
+            tmp_path,
+            data_provenance=first | {"normalized_hash": "b" * 64},
+        )
+
+    after = {
+        path.name: path.read_bytes()
+        for path in tmp_path.iterdir()
+        if path.is_file()
+    }
+    assert after == before

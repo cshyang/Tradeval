@@ -8,7 +8,7 @@ research-only disclaimer.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -71,7 +71,18 @@ def _metric_rows(values: dict[str, Any], labels: dict[str, str]) -> list[str]:
     return [f"| {labels[key]} | {rounded[key]} |" for key in labels]
 
 
-def render_report_md(manifest: ExperimentManifest, report: EvaluationReport) -> str:
+def _provenance_value(value: Any) -> str:
+    serialized = to_jsonable(value)
+    if isinstance(serialized, (dict, list)):
+        return json.dumps(serialized, sort_keys=True)
+    return str(serialized)
+
+
+def render_report_md(
+    manifest: ExperimentManifest,
+    report: EvaluationReport,
+    data_provenance: Mapping[str, Any] | None = None,
+) -> str:
     lines = [
         f"# Evaluation — {manifest.philosophy_name} {manifest.philosophy_version}",
         "",
@@ -89,6 +100,33 @@ def render_report_md(manifest: ExperimentManifest, report: EvaluationReport) -> 
         f"| Cadence | {manifest.cadence} |",
         f"| Window | {manifest.start.isoformat()} to {manifest.end.isoformat()} |",
         "",
+    ]
+    if data_provenance is not None:
+        labels = {
+            "kind": "Data kind",
+            "validity": "Validity",
+            "label": "Display label",
+            "transport": "Transport",
+            "provider": "Provider",
+            "provider_versions": "Provider versions",
+            "adjustment": "Adjustment",
+            "retrieved_at": "Retrieved at",
+            "query_hash": "Query hash",
+            "normalized_hash": "Normalized data hash",
+            "benchmark_kind": "Benchmark kind",
+            "reference_method_version": "Reference method",
+            "execution_model_version": "Execution model",
+        }
+        lines.extend(["## Data provenance", "", "| Input | Value |", "| --- | --- |"])
+        for key, label in labels.items():
+            if key in data_provenance:
+                lines.append(f"| {label} | {_provenance_value(data_provenance[key])} |")
+        warnings = data_provenance.get("warnings", [])
+        if warnings:
+            lines.extend(["", "### Provenance warnings", ""])
+            lines.extend(f"- {warning}" for warning in warnings)
+        lines.append("")
+    lines.extend([
         "## Performance",
         "",
         "| Metric | Value |",
@@ -101,12 +139,19 @@ def render_report_md(manifest: ExperimentManifest, report: EvaluationReport) -> 
         "| --- | --- |",
         *_metric_rows(report.fidelity.model_dump(), _FIDELITY_LABELS),
         "",
-    ]
+    ])
     return "\n".join(lines)
 
 
-def write_report_md(manifest: ExperimentManifest, report: EvaluationReport, path: Path) -> None:
-    path.write_text(render_report_md(manifest, report), encoding="utf-8")
+def write_report_md(
+    manifest: ExperimentManifest,
+    report: EvaluationReport,
+    path: Path,
+    data_provenance: Mapping[str, Any] | None = None,
+) -> None:
+    path.write_text(
+        render_report_md(manifest, report, data_provenance), encoding="utf-8"
+    )
 
 
 def render_comparison_md(

@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, time
 from decimal import Decimal
 from pathlib import Path
 
 from typer.testing import CliRunner
 
-from retailtrader.cli import INITIAL_CASH, SPY_PROXY, _benchmarks, _simulation_frames, app
+from retailtrader.cli import (
+    INITIAL_CASH,
+    SPY_PROXY,
+    _benchmarks,
+    _simulation_frames,
+    _view_model,
+    app,
+)
 
 from tests.helpers import make_frame
 
@@ -30,6 +38,44 @@ def test_demo_rejects_too_few_frames_before_writing_artifacts(tmp_path: Path) ->
     assert result.exit_code == 2
     assert "evaluation requires at least 3 simulation frames; got 2" in result.output
     assert not workspace.exists()
+
+
+def test_demo_writes_explicit_synthetic_provenance(tmp_path: Path) -> None:
+    workspace = tmp_path / "demo"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "demo",
+            "--workspace",
+            str(workspace),
+            "--start",
+            "2024-01-05",
+            "--end",
+            "2024-01-19",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    run_dirs = sorted(path for path in workspace.iterdir() if path.is_dir())
+    assert len(run_dirs) == 3
+    for run_dir in run_dirs:
+        provenance = json.loads((run_dir / "data-provenance.json").read_text())
+        assert provenance["kind"] == "synthetic"
+        assert provenance["validity"] == "synthetic_demo"
+        assert provenance["label"] == "SYNTHETIC DEMO DATA"
+        assert provenance["execution_model_version"] == "prior_close_next_open_v1"
+        assert "Generated deterministic prices" in (run_dir / "report.md").read_text()
+
+    runs = [
+        (json.loads((run_dir / "manifest.json").read_text()), run_dir)
+        for run_dir in run_dirs
+    ]
+    view_model = _view_model(runs)
+    for experiment in view_model["experiments"]:
+        assert len(experiment["rebalances"]) == len(experiment["equity"]) == 3
+        assert experiment["rebalances"][0]["as_of"] != view_model["dates"][0]
+        assert experiment["rebalances"][0]["execution_as_of"] == view_model["dates"][0]
 
 
 def test_simulation_frames_execute_on_next_session_after_decision() -> None:
