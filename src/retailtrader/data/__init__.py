@@ -12,6 +12,15 @@ from retailtrader.data.openbb import (
     OpenBBUnavailableError,
     OpenBBYFinancePriceSource,
 )
+from retailtrader.data.replay import (
+    REFERENCE_METHOD_VERSION,
+    build_price_frames,
+    build_reference_indices,
+    history_as_of,
+    market_close_utc,
+    market_open_utc,
+    weekly_session_pairs,
+)
 from retailtrader.data.protocol import (
     AvailableMarketBar,
     DailyPriceSource,
@@ -37,9 +46,16 @@ __all__ = [
     "PriceCacheIntegrityError",
     "PriceFetchResult",
     "PriceQuery",
+    "REFERENCE_METHOD_VERSION",
+    "build_price_frames",
+    "build_reference_indices",
     "canonical_json",
+    "history_as_of",
+    "market_close_utc",
+    "market_open_utc",
     "canonical_normalized_rows",
     "normalized_rows_hash",
     "query_key",
     "validate_batch_identity",
+    "weekly_session_pairs",
 ]
