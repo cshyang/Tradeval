@@ -18,7 +18,7 @@ from typing import Any, NoReturn
 import typer
 import yaml
 
-from retailtrader.agent.contracts import CandidateSet, MandateSpec
+from retailtrader.agent.contracts import CandidateSet, Decision, DecisionProposal, MandateSpec
 from retailtrader.agent.generator import PreparedFrame, run_agent_step
 from retailtrader.agent.screening import (
     prepare_screening_inputs,
@@ -1401,9 +1401,81 @@ def agent_finalize_hindsight(
         run_dir = workspace / "run"
         manifest = read_manifest(run_dir / "manifest.json")
         report = _evaluate_run(run_dir, manifest)
+        quality_workspace = workspace / "controls" / "deterministic-quality"
+        protocol_hash = "sha256:" + "d" * 64
+        for step_dir in sorted((workspace / "prepared").iterdir()):
+            candidates = CandidateSet.model_validate_json(
+                (step_dir / "candidate-set.json").read_text(encoding="utf-8")
+            )
+            mandate = MandateSpec.model_validate_json(
+                (step_dir / "mandate.json").read_text(encoding="utf-8")
+            )
+            proposal = DecisionProposal(
+                schema_version=1,
+                experiment_id=mandate.experiment_id,
+                decision_at=candidates.decision_at.isoformat().replace("+00:00", "Z"),
+                candidate_set_hash=candidates.candidate_set_hash,
+                agent_protocol_hash=protocol_hash,
+                decisions=tuple(
+                    Decision(
+                        symbol=candidate.symbol,
+                        stance="buy",
+                        confidence=1,
+                        desired_weight=mandate.limits.maximum_position_weight,
+                        thesis="deterministic price-quality control",
+                        evidence_refs=tuple(
+                            sorted(
+                                {
+                                    reference
+                                    for metric in candidate.metrics
+                                    for reference in metric.evidence_refs
+                                }
+                            )
+                        ),
+                        risks=("mechanical ranking",),
+                        invalidating_conditions=("candidate leaves screened set",),
+                        intended_holding_period="until next scheduled decision",
+                    )
+                    for candidate in candidates.candidates
+                ),
+                abstentions=(),
+            )
+            proposal_path = step_dir / "deterministic-quality-proposal.json"
+            content = json.dumps(
+                proposal.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+            ) + "\n"
+            if proposal_path.exists() and proposal_path.read_text(encoding="utf-8") != content:
+                raise ValueError(f"immutable quality control conflict: {proposal_path}")
+            if not proposal_path.exists():
+                proposal_path.write_text(content, encoding="utf-8")
+            run_agent_step(quality_workspace, proposal_path)
+        quality_run = quality_workspace / "run"
+        quality_manifest = read_manifest(quality_run / "manifest.json")
+        quality_report = _evaluate_run(quality_run, quality_manifest)
         comparison = workspace / "comparison.md"
-        write_comparison_md([(manifest, report)], comparison)
-        return {"evaluation_path": str(run_dir / "evaluation.json"), "comparison_path": str(comparison), "message": f"finalized {manifest.run_id}"}
+        write_comparison_md(
+            [(manifest, report), (quality_manifest, quality_report)], comparison
+        )
+        controls = workspace / "controls.json"
+        controls.write_text(
+            json.dumps(
+                {
+                    "cash": str(manifest.initial_cash),
+                    "equal_weight": "embedded no-cost reference series",
+                    "deterministic_quality": str(quality_run / "evaluation.json"),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "evaluation_path": str(run_dir / "evaluation.json"),
+            "comparison_path": str(comparison),
+            "controls_path": str(controls),
+            "message": f"finalized {manifest.run_id}",
+        }
 
     _execute("agent.finalize-hindsight", output_format, action)
 

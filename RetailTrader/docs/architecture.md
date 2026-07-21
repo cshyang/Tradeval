@@ -13,6 +13,14 @@ philosophy YAML
   -> static frontend
 ```
 
+The agent path is parallel to deterministic philosophy scoring:
+
+```text
+natural language -> Pi AI-INTERPRETED spec -> frozen mandate
+-> RetailTrader candidate set -> Pi desired weights
+-> RetailTrader adjudication -> shared execution step -> evaluation
+```
+
 `src/retailtrader/` owns every financial calculation. The frontend consumes one
 engine-emitted `runs/data.json` view model. It formats values, selects rows, and
 maps series into SVG coordinates; it does not derive financial results.
@@ -50,3 +58,7 @@ then replaces the old frontend dataset.
 Synthetic data, a future live provider, Pi narration, Flue supervision, and a
 broker mirror are adapters around stable philosophy, target, fill, portfolio,
 manifest, and evaluation contracts. None may become the source of portfolio truth.
+
+AgentTrader owns API jobs, Pi sessions, scheduling, and progress. RetailTrader owns market
+data, point-in-time evidence, candidate screening, every constraint, simulation, accounting,
+and evaluation. There is no broker or real-order adapter.

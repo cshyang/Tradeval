@@ -7,7 +7,7 @@ from datetime import UTC, date
 
 import pytest
 
-from retailtrader.data.openbb import OpenBBYFinancePriceSource
+from retailtrader.data.openbb import OpenBBUnavailableError, OpenBBYFinancePriceSource
 from retailtrader.data.protocol import PriceQuery
 
 
@@ -19,7 +19,10 @@ from retailtrader.data.protocol import PriceQuery
 def test_openbb_yfinance_completed_adjusted_daily_bars() -> None:
     query = PriceQuery(("AAPL",), date(2025, 1, 2), date(2025, 1, 8))
 
-    batch = OpenBBYFinancePriceSource().fetch(query)
+    try:
+        batch = OpenBBYFinancePriceSource().fetch(query)
+    except OpenBBUnavailableError as error:
+        pytest.skip(str(error))
 
     assert batch.transport == "openbb"
     assert batch.provider == "yfinance"

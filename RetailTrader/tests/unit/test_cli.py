@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -8,7 +9,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 import retailtrader.cli as cli_module
-from retailtrader.agent.contracts import CapitalSpec, HorizonSpec, LimitSpec, MandateSpec, UniverseSpec
+from retailtrader.agent.contracts import Candidate, CandidateSet, CapitalSpec, HorizonSpec, LimitSpec, MandateSpec, UniverseSpec, canonical_hash
 from retailtrader.agent.evidence import EvidenceMetric
 from retailtrader.agent.generator import AgentStepResult
 from retailtrader.agent.screening import ScreeningInput
@@ -266,3 +267,41 @@ def test_agent_step_returns_stable_json_envelope(tmp_path: Path, monkeypatch) ->
     assert payload["command"] == "agent.step"
     assert payload["result"]["status"] == "committed"
     assert payload["result"]["session"] == "2025-02-03"
+
+
+def test_finalize_hindsight_builds_deterministic_quality_control(tmp_path: Path, monkeypatch) -> None:
+    step = tmp_path / "prepared" / "2025-02-03"
+    step.mkdir(parents=True)
+    mandate = MandateSpec(
+        schema_version=1,
+        experiment_id="exp-control",
+        capital=CapitalSpec(currency="USD", initial_cash="100000.00"),
+        market="US",
+        universe=UniverseSpec(symbols=("AAPL",), screener="price_quality_v1", max_candidates=1, minimum_history_sessions=1, minimum_average_dollar_volume="1", minimum_evidence_coverage=0, pinned_symbols=(), excluded_symbols=()),
+        cadence="monthly",
+        horizon=HorizonSpec(kind="hindsight", start=date(2025, 1, 1), end=date(2025, 4, 1)),
+        limits=LimitSpec(minimum_cash_weight=0.1, maximum_position_weight=0.12, maximum_turnover=0.2, maximum_drawdown=0.25),
+    )
+    candidate_payload = {
+        "schema_version": 1, "experiment_id": mandate.experiment_id,
+        "screener": "price_quality_v1", "decision_at": "2025-01-31T20:00:00Z",
+        "market_data_hash": "sha256:" + "a" * 64,
+        "candidates": [Candidate(symbol="AAPL", score=1, evidence_coverage=1, price_history_sessions=300, average_dollar_volume="1", latest_price="100", metrics=()).model_dump(mode="json")],
+        "exclusions": [],
+    }
+    candidates = CandidateSet.model_validate(candidate_payload | {"candidate_set_hash": canonical_hash(candidate_payload)})
+    (step / "mandate.json").write_text(mandate.model_dump_json(), encoding="utf-8")
+    (step / "candidate-set.json").write_text(candidates.model_dump_json(), encoding="utf-8")
+    manifest = SimpleNamespace(run_id="exp-control", initial_cash=Decimal("100000.00"))
+    monkeypatch.setattr(cli_module, "read_manifest", lambda path: manifest)
+    monkeypatch.setattr(cli_module, "_evaluate_run", lambda *args: object())
+    monkeypatch.setattr(cli_module, "write_comparison_md", lambda *args: None)
+    proposals: list[Path] = []
+    monkeypatch.setattr(cli_module, "run_agent_step", lambda workspace, path: proposals.append(path))
+
+    result = invoke("agent", "finalize-hindsight", "--workspace", str(tmp_path), "--format", "json")
+
+    assert result.exit_code == 0, result.stdout
+    proposal = json.loads(proposals[0].read_text())
+    assert proposal["decisions"][0]["thesis"] == "deterministic price-quality control"
+    assert json.loads((tmp_path / "controls.json").read_text())["cash"] == "100000.00"

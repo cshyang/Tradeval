@@ -1,5 +1,14 @@
 # Experiment Lifecycle
 
+Agent experiments freeze a mandate and model protocol before work begins. Hindsight preparation
+creates deterministic frame sources; screening seals the candidate hash; Pi emits intent; and
+RetailTrader seals a prepared frame before deterministic adjudication. Repeating an identical
+session is a no-op, while conflicting content is an integrity error.
+
+Forward-paper schedules use the same candidate, proposal, and step contracts. Only the clock and
+temporal classification differ. Missing evidence or execution bars produce abstention or deferral,
+never relaxed limits.
+
 ## Commands
 
 Create an immutable synthetic run:

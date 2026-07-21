@@ -2,7 +2,8 @@
 
 ## Current State
 
-The v3 Philosophy Lab is an offline, deterministic, synthetic demonstration.
+The v3 Philosophy Lab retains its offline deterministic demonstration and now also exposes an
+API-aware AgentTrader experiment builder.
 The engine, lifecycle CLI, atomic export, and static frontend share versioned
 artifacts. Turnover limits are enforced, replay and paper stepping are the same
 transition, and resume rejects identity or materialization drift before writes.
@@ -28,10 +29,8 @@ and static export through Next.js 15.5.20.
 ## Deferred
 
 - Live OpenBB/provider/cache integration and real point-in-time filings.
-- Pi-generated read-only experiment narration.
 - Bull/base/bear scenarios and any future-facing hypothesis engine.
-- Functional browser-side philosophy execution; the static UI remains read-only.
-- Flue scheduling, broker mirroring, and real-money trading.
+- Remote Flue supervision, broker mirroring, and real-money trading.
 - Corporate actions, exchange calendars, liquidity, sentiment, shorting, and leverage.
 
 These are roadmap items, not partially shipped features. Locked UI affordances

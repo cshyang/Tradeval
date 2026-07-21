@@ -19,3 +19,5 @@ orders, fills, portfolio accounting, and evaluation.
 - Keep worker stdout protocol-only; operational logs go to stderr.
 - Prefer immutable values, explicit validation, deterministic serialization, and injected clocks/processes in tests.
 - Do not import RetailTrader Python modules. Launch its CLI with argument arrays, never shell strings.
+- SQLite is a searchable job/schedule index; JSON and JSONL artifacts remain audit truth.
+- Preserve `AI-INTERPRETED`, `HINDSIGHT SCENARIO`, and `FORWARD PAPER` labels end to end.

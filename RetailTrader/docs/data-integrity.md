@@ -11,6 +11,10 @@ Fundamental availability is approximated as 45 days after quarter end. This is
 not a substitute for filing acceptance timestamps from a real point-in-time
 provider.
 
+Agent evidence uses SEC company facts conservatively available at 00:00 UTC on the day after
+the filing date. Cached source payloads are immutable. Candidate and proposal hashes bind every
+AI decision to the exact evidence set visible at its decision cutoff.
+
 ## Timing
 
 For an execution session:
@@ -48,4 +52,6 @@ second benchmark is an equal-weight proxy for the full fixed universe.
 - Execution uses deterministic open prices and fixed slippage, not liquidity.
 - Constituents are fixed across history.
 - Fundamental timestamps are approximated and values are synthetic.
+- Model knowledge is not historically time-gated, so every model-assisted replay is labeled
+  `HINDSIGHT SCENARIO` even when market and filing inputs are point-in-time safe.
 - Shorting, leverage, tax, borrow, sentiment, and transaction-level impact are absent.
