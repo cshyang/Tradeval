@@ -2,6 +2,7 @@
 
 import { CSSProperties, useEffect, useState } from "react";
 import type { Experiment, RunData, Selected } from "../lib/types";
+import { ExperimentBuilder } from "../components/ExperimentBuilder";
 
 const SERIF = "var(--font-serif), serif";
 const SANS = "var(--font-sans), sans-serif";
@@ -47,8 +48,6 @@ export default function Page() {
   const [specOpen, setSpecOpen] = useState(false);
   const [specIdx, setSpecIdx] = useState(0);
   const [newOpen, setNewOpen] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [newTpl, setNewTpl] = useState(0);
 
   useEffect(() => {
     fetch("runs/data.json")
@@ -195,12 +194,9 @@ export default function Page() {
       {data && specOpen && (
         <SpecModal exp={data.experiments[specIdx]} T={T} color={PALETTE[specIdx % PALETTE.length]}
           onClose={() => setSpecOpen(false)}
-          onFork={() => { setSpecOpen(false); setNewTpl(specIdx); setNewOpen(true); }} />
+          onFork={() => { setSpecOpen(false); setNewOpen(true); }} />
       )}
-      {data && newOpen && (
-        <NewModal exps={data.experiments} T={T} name={newName} setName={setNewName}
-          tpl={newTpl} setTpl={setNewTpl} onClose={() => setNewOpen(false)} />
-      )}
+      {newOpen && <ExperimentBuilder onClose={() => setNewOpen(false)} />}
     </div>
   );
 }
@@ -254,41 +250,6 @@ function SpecModal({ exp, T, color, onClose, onFork }: {
       <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", borderTop: "1px solid var(--hl)", paddingTop: 14 }}>
         <button onClick={onFork} style={{ fontFamily: SANS, fontSize: 13, fontWeight: 500, background: "transparent", color: "var(--ink)", border: "1px solid var(--hl)", borderRadius: 6, padding: "8px 16px", cursor: "pointer" }}>Fork as new philosophy</button>
         <button onClick={onClose} style={{ fontFamily: SANS, fontSize: 13, fontWeight: 500, background: "var(--ink)", color: "var(--bg)", border: "1px solid var(--ink)", borderRadius: 6, padding: "8px 16px", cursor: "pointer" }}>Close</button>
-      </div>
-    </Modal>
-  );
-}
-
-function NewModal({ exps, T, name, setName, tpl, setTpl, onClose }: {
-  exps: Experiment[]; T: Theme; name: string; setName: (v: string) => void;
-  tpl: number; setTpl: (i: number) => void; onClose: () => void;
-}) {
-  return (
-    <Modal width={460} onClose={onClose}>
-      <div>
-        <div style={{ fontFamily: SERIF, fontSize: 21, fontWeight: 500 }}>New philosophy</div>
-        <div style={{ fontSize: 12.5, color: "var(--mut)", marginTop: 4 }}>A philosophy is a versioned YAML spec — factors, constraints, cadence — run by the deterministic engine.</div>
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <label htmlFor="new-name" style={{ fontSize: 10, letterSpacing: "0.12em", fontWeight: 600, color: "var(--mut)" }}>NAME</label>
-        <input id="new-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. dividend-momentum"
-          style={{ fontFamily: MONO, fontSize: 13, background: "transparent", color: "var(--ink)", border: "1px solid var(--hl)", borderRadius: 6, padding: "9px 12px", outline: "none" }} />
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <div style={{ fontSize: 10, letterSpacing: "0.12em", fontWeight: 600, color: "var(--mut)" }}>FORK FROM SPEC</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          {exps.map((e, i) => {
-            const sel = i === tpl;
-            return (
-              <button key={e.id} onClick={() => setTpl(i)} style={{ fontFamily: SANS, flex: 1, fontSize: 12.5, fontWeight: sel ? 600 : 400, background: sel ? T.pan : "transparent", color: sel ? T.ink : T.mut, border: `1px solid ${sel ? T.ink : T.hl}`, borderRadius: 6, padding: "8px 6px", cursor: "pointer" }}>{e.label} {e.version}</button>
-            );
-          })}
-        </div>
-      </div>
-      <div style={{ fontFamily: SERIF, fontStyle: "italic", fontSize: 13, color: "var(--mut)", borderTop: "1px solid var(--hl)", paddingTop: 12 }}>Running an experiment requires the engine. This demo build reads pre-computed artifacts only.</div>
-      <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-        <button onClick={onClose} style={{ fontFamily: SANS, fontSize: 13, fontWeight: 500, background: "transparent", color: "var(--ink)", border: "1px solid var(--hl)", borderRadius: 6, padding: "8px 16px", cursor: "pointer" }}>Cancel</button>
-        <button disabled title="Engine not attached in this build" style={{ fontFamily: SANS, fontSize: 13, fontWeight: 500, background: "var(--fnt)", color: "var(--mut)", border: "1px solid var(--hl)", borderRadius: 6, padding: "8px 16px", cursor: "not-allowed" }}>Run experiment — engine required</button>
       </div>
     </Modal>
   );
