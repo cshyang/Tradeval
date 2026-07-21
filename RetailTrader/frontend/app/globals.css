@@ -1,0 +1,66 @@
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #faf9f5;
+}
+a {
+  color: #8a744f;
+  text-decoration: none;
+}
+a:hover {
+  color: #6d5a3c;
+  text-decoration: underline;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #d5d3cb;
+  border-radius: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+[role="button"]:focus-visible,
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    flex-direction: column;
+    height: auto !important;
+    min-height: 100vh;
+    overflow: visible !important;
+  }
+
+  .sidebar {
+    width: 100% !important;
+    max-height: none;
+    border-right: 0 !important;
+    border-bottom: 1px solid var(--hl);
+  }
+
+  .content-shell {
+    min-height: 720px !important;
+  }
+
+  .decision-grid {
+    grid-template-columns: minmax(280px, 1fr) !important;
+  }
+
+  .decision-grid > div {
+    border-left: 0 !important;
+    padding-left: 0 !important;
+  }
+
+  .artifact-footer {
+    flex-wrap: wrap;
+    gap: 8px 16px !important;
+  }
+}

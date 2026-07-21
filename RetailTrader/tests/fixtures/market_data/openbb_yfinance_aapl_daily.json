@@ -1,0 +1,38 @@
+{
+  "provider": "yfinance",
+  "results": [
+    {
+      "date": "2025-01-02",
+      "open": 248.93,
+      "high": 249.10,
+      "low": 241.82,
+      "close": 243.85,
+      "volume": 55740700,
+      "dividend": 0.0,
+      "split_ratio": null,
+      "intra_period": false
+    },
+    {
+      "date": "2025-01-03",
+      "open": 243.36,
+      "high": 244.18,
+      "low": 241.89,
+      "close": 243.36,
+      "volume": 40244100,
+      "dividend": 0.0,
+      "split_ratio": null,
+      "intra_period": false
+    },
+    {
+      "date": "2025-01-06",
+      "open": 244.31,
+      "high": 247.33,
+      "low": 243.20,
+      "close": 245.00,
+      "volume": 45045600,
+      "dividend": 0.0,
+      "split_ratio": null,
+      "intra_period": false
+    }
+  ]
+}

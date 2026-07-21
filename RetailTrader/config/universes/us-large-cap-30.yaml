@@ -1,0 +1,35 @@
+# Fixed 30-symbol US large-cap demo universe (introduces selection bias;
+# documented as a v0 limitation).
+name: us-large-cap-30
+description: Fixed 30-symbol US large-cap demo universe.
+symbols:
+  - AAPL
+  - MSFT
+  - NVDA
+  - AMZN
+  - GOOGL
+  - META
+  - TSLA
+  - LLY
+  - JPM
+  - V
+  - JNJ
+  - WMT
+  - PG
+  - UNH
+  - XOM
+  - HD
+  - MA
+  - COST
+  - ABBV
+  - CVX
+  - MRK
+  - PEP
+  - KO
+  - ADBE
+  - CRM
+  - NFLX
+  - AMD
+  - INTC
+  - ORCL
+  - CSCO
