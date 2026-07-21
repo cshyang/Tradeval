@@ -18,8 +18,8 @@ from typing import Any, NoReturn
 import typer
 import yaml
 
-from retailtrader.agent.contracts import MandateSpec
-from retailtrader.agent.generator import run_agent_step
+from retailtrader.agent.contracts import CandidateSet, MandateSpec
+from retailtrader.agent.generator import PreparedFrame, run_agent_step
 from retailtrader.agent.screening import (
     prepare_screening_inputs,
     screen_candidates,
@@ -1315,6 +1315,97 @@ def agent_candidates(
         }
 
     _execute("agent.candidates", output_format, action)
+
+
+@agent_app.command("prepare-hindsight")
+def agent_prepare_hindsight(
+    experiment: Path = typer.Option(...),
+    workspace: Path = typer.Option(...),
+    output_format: OutputFormat = typer.Option(OutputFormat.text, "--format"),
+) -> None:
+    """Prepare deterministic synthetic frame sources for a hindsight mandate."""
+
+    def action() -> dict[str, Any]:
+        mandate = MandateSpec.model_validate_json(experiment.read_text(encoding="utf-8"))
+        if mandate.horizon.kind != "hindsight" or mandate.horizon.end is None:
+            raise ValueError("prepare-hindsight requires a bounded hindsight mandate")
+        sessions = _scheduled_sessions(mandate.horizon.start, mandate.horizon.end, mandate.cadence)
+        frames = _frames(mandate.universe.symbols, sessions)
+        benchmark_symbols = tuple(sorted(set(mandate.universe.symbols) | set(SYNTHETIC_MEGA_CAP_PROXY)))
+        references = _benchmarks(_snapshots(benchmark_symbols, sessions), mandate.universe.symbols)
+        prepared = []
+        for frame in frames:
+            session = frame.execution_session.isoformat()
+            step_dir = workspace / "prepared" / session
+            step_dir.mkdir(parents=True, exist_ok=True)
+            source = {
+                "schema_version": 1,
+                "experiment_id": mandate.experiment_id,
+                "decision": frame.decision.model_dump(mode="json"),
+                "execution": frame.execution.model_dump(mode="json"),
+                "execution_at": frame.execution_at.isoformat().replace("+00:00", "Z"),
+                "reference_equity": str(references[frame.execution_session][0]),
+                "equal_weight_equity": str(references[frame.execution_session][1]),
+                "reference_column": "synthetic_mega_cap_proxy_equity",
+            }
+            for path, payload in (
+                (step_dir / "frame-source.json", source),
+                (step_dir / "mandate.json", mandate.model_dump(mode="json")),
+            ):
+                content = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+                if path.exists() and path.read_text(encoding="utf-8") != content:
+                    raise ValueError(f"immutable prepared input conflict: {path}")
+                if not path.exists():
+                    path.write_text(content, encoding="utf-8")
+            prepared.append({
+                "session": session,
+                "decision_at": frame.decision.as_of.isoformat().replace("+00:00", "Z"),
+                "step_directory": str(step_dir),
+            })
+        return {"frames": prepared, "message": f"prepared {len(prepared)} hindsight frames"}
+
+    _execute("agent.prepare-hindsight", output_format, action)
+
+
+@agent_app.command("prepare-frame")
+def agent_prepare_frame(
+    source: Path = typer.Option(...),
+    candidate_set: Path = typer.Option(...),
+    out: Path = typer.Option(...),
+    output_format: OutputFormat = typer.Option(OutputFormat.text, "--format"),
+) -> None:
+    """Seal a frame source to the screened candidate-set identity."""
+
+    def action() -> dict[str, Any]:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+        candidates = CandidateSet.model_validate_json(candidate_set.read_text(encoding="utf-8"))
+        prepared = PreparedFrame.model_validate(payload | {"candidate_set_hash": candidates.candidate_set_hash})
+        content = json.dumps(prepared.model_dump(mode="json"), sort_keys=True, separators=(",", ":")) + "\n"
+        if out.exists() and out.read_text(encoding="utf-8") != content:
+            raise ValueError(f"immutable prepared frame conflict: {out}")
+        if not out.exists():
+            out.write_text(content, encoding="utf-8")
+        return {"out": str(out), "candidate_set_hash": candidates.candidate_set_hash, "message": f"prepared frame {out}"}
+
+    _execute("agent.prepare-frame", output_format, action)
+
+
+@agent_app.command("finalize-hindsight")
+def agent_finalize_hindsight(
+    workspace: Path = typer.Option(...),
+    output_format: OutputFormat = typer.Option(OutputFormat.text, "--format"),
+) -> None:
+    """Evaluate a committed agent run and its embedded passive controls."""
+
+    def action() -> dict[str, Any]:
+        run_dir = workspace / "run"
+        manifest = read_manifest(run_dir / "manifest.json")
+        report = _evaluate_run(run_dir, manifest)
+        comparison = workspace / "comparison.md"
+        write_comparison_md([(manifest, report)], comparison)
+        return {"evaluation_path": str(run_dir / "evaluation.json"), "comparison_path": str(comparison), "message": f"finalized {manifest.run_id}"}
+
+    _execute("agent.finalize-hindsight", output_format, action)
 
 
 @agent_app.command("step")

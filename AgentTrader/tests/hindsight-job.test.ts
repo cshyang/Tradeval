@@ -103,7 +103,7 @@ describe('hindsight job', () => {
       expect(events.filter(({ type, stage }) => type === 'artifact' && stage === 'proposal')).toHaveLength(2)
       expect(events.filter(({ type, stage }) => type === 'artifact' && stage === 'adjudication')).toHaveLength(2)
       expect(result.sessions).toHaveLength(2)
-      expect(events.filter(({ type }) => type === 'command')).toHaveLength(6)
+      expect(events.filter(({ type }) => type === 'command')).toHaveLength(8)
       expect(events.some(({ type, detail }) => type === 'command' && detail?.includes('fixture-revision'))).toBe(true)
       expect(events.some(({ type, detail }) => type === 'log' && detail?.includes('fake RetailTrader'))).toBe(true)
       expect(result.sessions.every(({ proposalPath, adjudicationPath }) =>

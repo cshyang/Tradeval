@@ -55,6 +55,9 @@ if (command === 'agent.prepare-hindsight') {
     proposal_path: proposalPath,
     adjudication_path: adjudicationPath,
   }
+} else if (command === 'agent.prepare-frame') {
+  writeFileSync(option('--out'), JSON.stringify({ fixture: true }) + '\n')
+  result = { out: option('--out') }
 } else if (command === 'agent.finalize-hindsight') {
   const evaluationPath = join(workspace, 'evaluation.json')
   const comparisonPath = join(workspace, 'comparison.json')

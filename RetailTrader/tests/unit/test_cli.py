@@ -211,6 +211,26 @@ def test_agent_candidates_writes_stable_json_artifact(
     assert payload["result"]["candidate_count"] == 1
     assert json.loads(first_bytes)["candidates"][0]["symbol"] == "AAPL"
 
+    workspace = tmp_path / "hindsight"
+    prepared = invoke(
+        "agent", "prepare-hindsight",
+        "--experiment", str(mandate_path),
+        "--workspace", str(workspace),
+        "--format", "json",
+    )
+    assert prepared.exit_code == 0, prepared.stdout
+    frame = json.loads(prepared.stdout)["result"]["frames"][0]
+    step_dir = Path(frame["step_directory"])
+    sealed = invoke(
+        "agent", "prepare-frame",
+        "--source", str(step_dir / "frame-source.json"),
+        "--candidate-set", str(out),
+        "--out", str(step_dir / "prepared-frame.json"),
+        "--format", "json",
+    )
+    assert sealed.exit_code == 0, sealed.stdout
+    assert json.loads((step_dir / "prepared-frame.json").read_text())["candidate_set_hash"] == payload["result"]["candidate_set_hash"]
+
 
 def test_agent_step_returns_stable_json_envelope(tmp_path: Path, monkeypatch) -> None:
     proposal = tmp_path / "decision-proposal.json"

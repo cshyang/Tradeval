@@ -164,6 +164,14 @@ export async function runHindsightJob(
       )
       artifact('candidate_set', candidateSetPath, frame.session)
 
+      await runRetailTrader([
+        'agent', 'prepare-frame',
+        '--source', join(frame.step_directory, 'frame-source.json'),
+        '--candidate-set', candidateSetPath,
+        '--out', join(frame.step_directory, 'prepared-frame.json'),
+        '--format', 'json',
+      ])
+
       stage('generating_proposal', frame.session)
       if (!existsSync(proposalPath)) {
         await options.proposalWorker.generate({
