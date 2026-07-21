@@ -19,6 +19,7 @@ import typer
 import yaml
 
 from retailtrader.agent.contracts import MandateSpec
+from retailtrader.agent.generator import run_agent_step
 from retailtrader.agent.screening import (
     prepare_screening_inputs,
     screen_candidates,
@@ -1314,6 +1315,23 @@ def agent_candidates(
         }
 
     _execute("agent.candidates", output_format, action)
+
+
+@agent_app.command("step")
+def agent_step(
+    workspace: Path = typer.Option(..., help="Persistent agent experiment workspace."),
+    proposal: Path = typer.Option(..., help="DecisionProposal JSON with sibling inputs."),
+    output_format: OutputFormat = typer.Option(OutputFormat.text, "--format"),
+) -> None:
+    """Adjudicate and commit one prepared agent decision frame."""
+
+    def action() -> dict[str, Any]:
+        result = run_agent_step(workspace, proposal)
+        return result.model_dump(mode="json") | {
+            "message": f"{result.status}: session {result.session}"
+        }
+
+    _execute("agent.step", output_format, action)
 
 
 @app.command()

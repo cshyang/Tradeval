@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 import retailtrader.cli as cli_module
 from retailtrader.agent.contracts import CapitalSpec, HorizonSpec, LimitSpec, MandateSpec, UniverseSpec
 from retailtrader.agent.evidence import EvidenceMetric
+from retailtrader.agent.generator import AgentStepResult
 from retailtrader.agent.screening import ScreeningInput
 from retailtrader.cli import PHILOSOPHY_DIR, app
 
@@ -209,3 +210,39 @@ def test_agent_candidates_writes_stable_json_artifact(
     assert payload["command"] == "agent.candidates"
     assert payload["result"]["candidate_count"] == 1
     assert json.loads(first_bytes)["candidates"][0]["symbol"] == "AAPL"
+
+
+def test_agent_step_returns_stable_json_envelope(tmp_path: Path, monkeypatch) -> None:
+    proposal = tmp_path / "decision-proposal.json"
+    proposal.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        cli_module,
+        "run_agent_step",
+        lambda workspace, proposal_path: AgentStepResult(
+            status="committed",
+            experiment_id="exp-agent-step",
+            session="2025-02-03",
+            proposal_hash="sha256:" + "a" * 64,
+            adjudication_hash="sha256:" + "b" * 64,
+            proposal_path=str(proposal_path),
+            adjudication_path=str(workspace / "audit/adjudication.json"),
+            total_equity="100100.00",
+        ),
+    )
+
+    result = invoke(
+        "agent",
+        "step",
+        "--workspace",
+        str(tmp_path),
+        "--proposal",
+        str(proposal),
+        "--format",
+        "json",
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "agent.step"
+    assert payload["result"]["status"] == "committed"
+    assert payload["result"]["session"] == "2025-02-03"
