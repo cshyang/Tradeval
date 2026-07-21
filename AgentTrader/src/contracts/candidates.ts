@@ -1,4 +1,5 @@
 import { type Static, Type } from '@sinclair/typebox'
+import { Value } from '@sinclair/typebox/value'
 
 const EvidenceMetricSchema = Type.Object(
   {
@@ -56,3 +57,21 @@ export const CandidateSetSchema = Object.freeze(
 )
 
 export type CandidateSet = Static<typeof CandidateSetSchema>
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) {
+      deepFreeze(child)
+    }
+    Object.freeze(value)
+  }
+  return value
+}
+
+export function parseCandidateSet(value: unknown): CandidateSet {
+  if (!Value.Check(CandidateSetSchema, value)) {
+    const issue = Value.Errors(CandidateSetSchema, value).First()
+    throw new TypeError(issue?.message ?? 'invalid CandidateSet')
+  }
+  return deepFreeze(structuredClone(value) as CandidateSet)
+}
