@@ -9,7 +9,7 @@ import { MandateSpecSchema } from '../../contracts/mandate.js'
 import { AgentProtocolSchema } from '../../contracts/protocol.js'
 import type { JobRecord, JobStore } from '../../jobs/store.js'
 
-export type ApiOperation = 'philosophy.generate' | 'experiment.run'
+export type ApiOperation = 'philosophy.generate' | 'experiment.run' | 'experiment.forward'
 export interface ApiJobRequest {
   readonly operation: ApiOperation
   readonly jobId: string
@@ -123,7 +123,8 @@ export function registerExperimentRoutes(app: Hono, service: ExperimentService):
       if (!Value.Check(MandateSpecSchema, body.mandate)) throw new TypeError('valid mandate is required')
       if (!Value.Check(AgentProtocolSchema, body.protocol)) throw new TypeError('valid agent protocol is required')
       if (body.mandate.experiment_id !== body.experiment_id) throw new TypeError('mandate experiment_id must match')
-      const job = service.create('experiment.run', c.req.header('Idempotency-Key') ?? '', body)
+      const horizon = body.mandate.horizon.kind
+      const job = service.create(horizon === 'forward' ? 'experiment.forward' : 'experiment.run', c.req.header('Idempotency-Key') ?? '', body)
       return c.json({ job_id: job.jobId, experiment_id: job.experimentId }, 202)
     } catch (error) { return errorResponse(c, error) }
   })

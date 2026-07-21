@@ -45,6 +45,15 @@ export function createRuntimeExecutor(config: AgentTraderConfig, store: JobStore
     if (!Value.Check(AgentProtocolSchema, request.body.protocol)) throw new TypeError('invalid agent protocol')
     const mandate = structuredClone(request.body.mandate) as MandateSpec
     const protocol = structuredClone(request.body.protocol) as AgentProtocol
+    if (request.operation === 'experiment.forward') {
+      const schedulePath = join(request.workspace, 'forward-schedule.json')
+      immutableJson(schedulePath, {
+        classification: 'FORWARD PAPER', mandate, protocol,
+        next_due_at: new Date(Date.now() + 60_000).toISOString(),
+      })
+      store.update(request.jobId, { status: 'queued', stage: 'scheduled', resultPath: schedulePath })
+      return
+    }
     const retailTrader = new RetailTraderClient({
       executable: config.retailTraderExecutable,
       executableArgs: ['run', 'retailtrader'],
