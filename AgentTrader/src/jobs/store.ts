@@ -110,6 +110,13 @@ export class JobStore {
     return row ? record(row) : undefined
   }
 
+  getByExperiment(experimentId: string): JobRecord | undefined {
+    const row = this.database
+      .prepare('SELECT * FROM jobs WHERE experiment_id = ? ORDER BY created_at DESC LIMIT 1')
+      .get(experimentId) as JobRow | undefined
+    return row ? record(row) : undefined
+  }
+
   close(): void {
     this.database.close()
   }

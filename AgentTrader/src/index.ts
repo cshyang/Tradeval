@@ -1,8 +1,14 @@
-import { serve } from '@hono/node-server'
 import { pathToFileURL } from 'node:url'
 import { Hono } from 'hono'
 
 import { type AgentTraderConfig, loadConfig } from './config.js'
+import { createRuntimeExecutor } from './api/runtime.js'
+import { startApiServer } from './api/server.js'
+import { ExperimentService } from './api/routes/experiments.js'
+import { JobStore } from './jobs/store.js'
+import { join } from 'node:path'
+export { createApiApp } from './api/app.js'
+export { gracefulShutdown, startApiServer } from './api/server.js'
 
 export function createApp(config: AgentTraderConfig): Hono {
   const app = new Hono()
@@ -18,16 +24,11 @@ export function createApp(config: AgentTraderConfig): Hono {
 
 function start(): void {
   const config = loadConfig()
-  const app = createApp(config)
-  serve(
-    {
-      fetch: app.fetch,
-      port: config.apiPort,
-    },
-    ({ port }) => {
-      console.error(`AgentTrader listening on http://localhost:${port}`)
-    },
-  )
+  const store = new JobStore(join(config.workspaceRoot, 'jobs.sqlite'))
+  const service = new ExperimentService(config.workspaceRoot, store, createRuntimeExecutor(config, store))
+  const { server } = startApiServer(config, service, store)
+  const address = server.address()
+  console.error(`AgentTrader listening on port ${typeof address === 'object' && address ? address.port : config.apiPort}`)
 }
 
 const entryPoint = process.argv[1]
